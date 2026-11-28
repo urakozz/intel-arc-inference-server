@@ -4,14 +4,14 @@ An inference engine for Intel Arc Pro B70 graphics cards, as a plain tarball - n
 and run `bin/b70-serve` (an OpenAI-compatible server) or `bin/b70-decode` (a single-model benchmark) directly.
 
 ```sh
-tar -xzf intel-inference-server-1.2.0-linux-x86_64.tar.gz
-cd intel-inference-server-1.2.0
+tar -xzf intel-inference-server-1.2.1-linux-x86_64.tar.gz
+cd intel-inference-server-1.2.1
 ```
 
 ## What is inside
 
 ```
-intel-inference-server-1.2.0/
+intel-inference-server-1.2.1/
 ├── bin/
 │   ├── b70-serve     # the server: OpenAI-compatible API on port 8000
 │   └── b70-decode    # decode-step benchmark for one checkpoint

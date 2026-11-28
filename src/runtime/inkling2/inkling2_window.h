@@ -6,7 +6,9 @@
 // so the same request makes the same rounds (verify rows are not the plain step's arithmetic). The K with the most ids
 // per cost wins; 0 is a plain step, and while 0 wins a one-draft round now and then keeps the rates current.
 // The costs move with the context (the drafter's full layer reads every position, the plain step's full visits too):
-// a table by depth, interpolated linearly at the round's position, the ends held.
+// a table by depth, interpolated linearly at the round's position, the ends held. b70-serve does not serve on these
+// tables: it measures its own round costs at load and keeps them current from every round (server::LiveCost); a
+// table here is b70-decode's window and the server's prior for a width or depth no round has timed yet.
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -38,33 +40,29 @@ inline constexpr std::array<DepthCost, 3> kOneCardCosts{{
     {32768, {{1.000, 1.106, 1.337, 1.457, 1.598, 1.712, 1.815, 1.945}, 0.300}},
     {131072, {{1.000, 1.110, 1.407, 1.512, 1.617, 1.703, 1.781, 1.899}, 0.409}},
 }};
-// Plan 41k: one card with the DFlash 2 drafter (int8 linears; b70-decode --profile --spec dflash, card 0,
-// 2026-11-26): the verify rows are the target's (as above, re-measured), the draft pass flat in depth - every drafter
-// layer slides over its 2048-position ring - at 2.94 / 2.84 / 2.83 ms at 4k / 32k / 128k with the draft head on the
-// 2-bit candidates and the exact rerank (card 1; the int8 head: 3.35-3.38 ms, bf16 linears: 3.82).
-inline constexpr WindowCost kOneCardDflashCost{{1.000, 1.167, 1.355, 1.503, 1.679, 1.826, 1.963, 2.175}, 0.232};
+// Plan 41k: the DFlash 2 drafter (the packed int4 drafter, the 2-bit candidate head; b70-decode --profile --spec
+// dflash, main 49f34642, 2026-11-27): one card (card 0) plain 11.71 / 13.42 / 18.75 ms at 4k / 32k / 128k, the draft
+// pass flat at 1.70-1.72 ms - every drafter layer slides over its 2048-position ring.
+inline constexpr WindowCost kOneCardDflashCost{{1.000, 1.170, 1.360, 1.476, 1.614, 1.761, 1.872, 1.960}, 0.145};
 inline constexpr std::array<DepthCost, 3> kOneCardDflashCosts{{
     {4096, kOneCardDflashCost},
-    {32768, {{1.000, 1.154, 1.415, 1.547, 1.699, 1.832, 1.959, 2.139}, 0.197}},
-    {131072, {{1.000, 1.121, 1.465, 1.554, 1.662, 1.760, 1.848, 1.968}, 0.143}},
+    {32768, {{1.000, 1.151, 1.429, 1.524, 1.639, 1.776, 1.851, 1.954}, 0.127}},
+    {131072, {{1.000, 1.138, 1.488, 1.553, 1.645, 1.745, 1.821, 1.881}, 0.092}},
 }};
-// The DFlash 2 drafter under pp (on card 1, plain step 12.7 / 14.6 / 19.8 / 36.8 ms at 4k / 32k / 128k / 512k, the last
-// on the int8 cache) and tp (whole on both cards but its head's rows, plain 10.8 / 12.1 / 14.8 ms): b70-decode
-// --profile --spec dflash, both cards, 2026-11-26; the draft pass flat. pp's drafter is the one-card list on card 1:
-// its column is the one-card pass (2.94 / 2.84 / 2.83 ms, the 128k pass at 512k) over pp's plain steps.
+// ... under pp (the drafter on card 1; plain 11.68 / 13.54 / 18.77 / 43.46 ms at 4k / 32k / 128k / 512k, the
+// pass 1.72-1.82 ms) and tp (whole on both cards but its head's rows; plain 9.99 / 10.82 / 13.90 ms, the pass 2.10-2.13 ms),
+// both cards, the same run.
 inline constexpr std::array<DepthCost, 4> kPpDflashCosts{{
-    {4096, {{1.000, 1.177, 1.368, 1.518, 1.702, 1.844, 1.987, 2.194}, 0.231}},
-    {32768, {{1.000, 1.145, 1.403, 1.536, 1.694, 1.832, 1.949, 2.123}, 0.195}},
-    {131072, {{1.000, 1.117, 1.482, 1.584, 1.705, 1.803, 1.890, 2.016}, 0.143}},
-    {524288, {{1.000, 1.138, 1.548, 1.615, 1.679, 1.756, 1.810, 1.880}, 0.077}},
+    {4096, {{1.000, 1.176, 1.370, 1.485, 1.628, 1.770, 1.874, 1.959}, 0.147}},
+    {32768, {{1.000, 1.149, 1.426, 1.518, 1.640, 1.772, 1.840, 1.939}, 0.129}},
+    {131072, {{1.000, 1.119, 1.489, 1.570, 1.647, 1.734, 1.800, 1.859}, 0.093}},
+    {524288, {{1.000, 1.043, 1.507, 1.527, 1.544, 1.589, 1.595, 1.629}, 0.042}},
 }};
-// The drafter's head rows split over the cards: its pass 3.16 / 3.10 ms at 32k / 128k (flat in depth), 3.13 ms over
-// 4k's 10.80 ms plain step.
-inline constexpr WindowCost kTpDflashCost{{1.000, 1.134, 1.275, 1.405, 1.552, 1.663, 1.796, 2.027}, 0.290};
+inline constexpr WindowCost kTpDflashCost{{1.000, 1.097, 1.246, 1.363, 1.477, 1.586, 1.663, 1.778}, 0.213};
 inline constexpr std::array<DepthCost, 3> kTpDflashCosts{{
     {4096, kTpDflashCost},
-    {32768, {{1.000, 1.130, 1.297, 1.442, 1.641, 1.741, 1.891, 2.134}, 0.265}},
-    {131072, {{1.000, 1.150, 1.389, 1.572, 1.884, 2.007, 2.209, 2.508}, 0.211}},
+    {32768, {{1.000, 1.105, 1.282, 1.428, 1.584, 1.717, 1.839, 1.985}, 0.194}},
+    {131072, {{1.000, 1.135, 1.379, 1.552, 1.845, 1.975, 2.140, 2.368}, 0.152}},
 }};
 inline constexpr std::array<DepthCost, 2> kTpCosts{{
     {4096, kTpCost},

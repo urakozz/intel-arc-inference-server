@@ -7,9 +7,14 @@
 // (two slots, crossing i in slot i % 2) and signals `sent`; the next unit on each card waits for both cards' `sent`
 // (the other's rows are in, its own part may be rewritten) and adds the two parts, card 0's first.
 //
-// Two lanes (chunk j's scratch is lane j % 2): the lagging chunk's unit i is recorded after the leading chunk's unit
-// i + 2, so its visit v starts after the leader finished visit v (its caches, rings and convolution histories); each
-// unit's crossing then has the other chunk's unit to hide behind. Both cards record the same units in the same order.
+// A chunk of at least 64 rows splits its glue rows between the cards (Engine::tp_split_rows): each all-reduce sums
+// only the rows a card's glue reads, and after each part's glue a gather writes the card's rows of its output (the
+// attention's or the experts' normed inputs; at the end the head's row and the drafter's taps) into the other card,
+// which waits for them as for an all-reduce: up to 193 crossings a chunk.
+//
+// Two lanes (chunk j's scratch is lane j % 2): the lagging chunk's next unit is recorded once the leading chunk has
+// committed the visit it works on, so its visit v starts after the leader finished visit v (its caches, rings and
+// convolution histories); each unit's crossing then has the other chunk's unit to hide behind. Both cards record the same units in the same order.
 // With the prefix cache's hook a chunk that ends at a mid-prompt block end copies each visit's state slots into a
 // shadow right after the visit (the next chunk rewrites them a visit later) and the host stores that block end while
 // the next chunks run, as under pp: the copies of block end h are recorded only after the hook stored h - 2.
@@ -28,7 +33,7 @@ namespace runtime::inkling2 {
 namespace {
 using D = model::Inkling2Desc;
 namespace k = kernels::inkling2;
-constexpr uint32_t kCrossings = 2 * D::visit_count;   // a chunk's all-reduces
+constexpr uint32_t kCrossings = 4 * D::visit_count + 1;   // a split chunk's all-reduces and gathers, at most
 }  // namespace
 
 uint32_t TpEngine::prefill(std::span<const uint32_t> ids, uint32_t cap) {
@@ -144,43 +149,81 @@ uint32_t TpEngine::prefill(std::span<const uint32_t> ids, uint32_t cap) {
     for (auto& e : cards_) e->committed_ = base;
   };
   // One unit of chunk j on both cards.
+  // An all-reduce's row ranges (first, count) card r sums, which are the ones the other card sends it: every row, or
+  // on a split chunk the rows the card's glue and commit read (Engine::Crossing::half).
+  const auto sum_ranges = [](const Engine::Crossing& x, uint32_t r) -> std::array<std::pair<uint32_t, uint32_t>, 2> {
+    if (!x.half) return {{{0, x.rows}, {0, 0}}};
+    if (r == 0) return {{{0, x.half}, {x.rows - 3, 3}}};
+    return {{{x.half - 3, x.rows - x.half + 3}, {0, 0}}};
+  };
+  // One unit of chunk j on both cards.
   const auto unit = [&](uint32_t j) {
     Lane& lane = lanes[j];
     const uint32_t u = lane.units++;
     const int hook = hook_of[j];
-    if (hook >= 0 && u == 2)   // its first shadow copy follows: shadow hook % 2 must be stored
+    // the unit after a visit's experts' all-reduce: that visit's convolution and commit run first
+    const int32_t ended = u ? lane.crossing[0].mlp_visit : -1;
+    if (hook >= 0 && ended == 0)   // its first shadow copy follows: shadow hook % 2 must be stored
       while (stored + 2 <= uint32_t(hook)) store();
     for (uint32_t r = 0; r < 2; ++r) {
       Engine& e = *cards_[r];
       auto& list = *compute_[r];
       auto& walk = lane.walk[r];
-      if (u) {   // crossing u - 1: both cards' rows in, card 0's first
+      if (u) {   // crossing u - 1: both cards' rows in; an all-reduce sums them, card 0's first
         const uint32_t c = u - 1;
         const auto& x = lane.crossing[r];
         list.wait_event(sent(j, c, 1 - r));
         list.wait_event(sent(j, c, r));
-        const auto* landing = static_cast<const std::byte*>(walk.s->tp_landing->ptr()) +
-                              (c % 2) * (walk.s->tp_landing->size() / 2);
-        const void* mine = x.part;
-        e.launch(list, k::tp_prefill_glue(e.bf16_glue_), "ink_tp_sum", 128, D::hidden / 128, x.rows,
-                 r == 0 ? mine : landing, r == 0 ? static_cast<const void*>(landing) : mine, x.sum);
+        if (x.part) {
+          const auto* landing = static_cast<const std::byte*>(walk.s->tp_landing->ptr()) +
+                                (c % 2) * (walk.s->tp_landing->size() / 2);
+          for (const auto& [first, rows] : sum_ranges(x, r)) {
+            if (!rows) continue;
+            const size_t off = size_t(first) * D::hidden * sizeof(float);
+            const void* mine = static_cast<const std::byte*>(x.part) + off;
+            const void* theirs = landing + off;
+            e.launch(list, k::tp_prefill_glue(e.bf16_glue_), "ink_tp_sum", 128, D::hidden / 128, rows,
+                     r == 0 ? mine : theirs, r == 0 ? theirs : mine, static_cast<std::byte*>(x.sum) + off);
+          }
+        }
       }
       const auto crossing = e.record_prefill_part(list, walk);
-      // The visit before this unit's attention just ended (its experts' convolution and commit): its state slots
-      // into the block end's shadow; after the last unit, the last visit's and the drafter's.
-      if (hook >= 0 && u >= 2 && u % 2 == 0) e.record_visit_shadow(list, u / 2 - 1, uint32_t(hook) % 2);
+      // The visit whose all-reduce this unit began with just ended (its experts' convolution and commit): its state
+      // slots into the block end's shadow; after the last unit, the last visit's and the drafter's.
+      if (hook >= 0 && ended >= 0) e.record_visit_shadow(list, uint32_t(ended), uint32_t(hook) % 2);
       if (crossing) {
         lane.crossing[r] = *crossing;
         const uint32_t c = u;
         Engine& peer = *cards_[1 - r];
-        const auto& landing = *(j % 2 ? peer.buffers_.prefill_b : peer.buffers_.prefill).tp_landing;
+        const auto& theirs = j % 2 ? peer.buffers_.prefill_b : peer.buffers_.prefill;
         list.barrier_signal(ready(j, c, r));
         copy_[r]->wait_event(ready(j, c, r));
-        copy_[r]->copy(static_cast<std::byte*>(landing.ptr()) + (c % 2) * (landing.size() / 2), crossing->part,
-                       size_t(crossing->rows) * D::hidden * sizeof(float));
+        if (crossing->part) {   // the rows the other card sums, into its landing
+          auto* landing = static_cast<std::byte*>(theirs.tp_landing->ptr()) + (c % 2) * (theirs.tp_landing->size() / 2);
+          constexpr size_t row = D::hidden * sizeof(float);
+          for (const auto& [first, rows] : sum_ranges(*crossing, 1 - r))
+            if (rows)
+              copy_[r]->copy(landing + first * row, static_cast<const std::byte*>(crossing->part) + first * row,
+                             rows * row);
+        } else {   // this card's rows of the glue's output, into the other card's same place
+          const PrefillBuffers& mine = *walk.s;
+          for (uint32_t i = 0; i < crossing->ranges; ++i) {
+            const auto [from, bytes] = crossing->gather[i];
+            const auto* p = static_cast<const std::byte*>(from);
+            void* to = nullptr;
+            for (const auto member : {&PrefillBuffers::inputs, &PrefillBuffers::draft_taps}) {
+              const auto& own = mine.*member;
+              const auto* base = own ? static_cast<const std::byte*>(own->ptr()) : nullptr;
+              if (base && p >= base && p + bytes <= base + own->size())
+                to = static_cast<std::byte*>((theirs.*member)->ptr()) + (p - base);
+            }
+            contract_assert(to != nullptr);
+            copy_[r]->copy(to, from, bytes);
+          }
+        }
         copy_[r]->barrier_signal(sent(j, c, r));
       } else {
-        contract_assert(walk.done && u == kCrossings);
+        contract_assert(walk.done);
         if (hook >= 0) {
           e.record_visit_shadow(list, D::visit_count, uint32_t(hook) % 2);
           list.barrier_signal(pool.handle(shadowed(uint32_t(hook), r)));
@@ -196,7 +239,8 @@ uint32_t TpEngine::prefill(std::span<const uint32_t> ids, uint32_t cap) {
     if (!lead_lane.done) unit(lead_j);
     if (lag_j < n) {
       Lane& lag = lanes[lag_j];
-      if (!lag.done && (lead_lane.done || lag.units + 3 <= lead_lane.units)) unit(lag_j);
+      // its visit's state (caches, rings, histories) committed by the leader first
+      if (!lag.done && (lead_lane.done || lag.walk[0].visit < lead_lane.walk[0].visit)) unit(lag_j);
     }
     if (lead_lane.done) {
       lead_j = lag_j;

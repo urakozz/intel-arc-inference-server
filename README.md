@@ -6,8 +6,8 @@ coding-agent sessions (opencode and similar).
 
 ## Key features
 
-- **Fast speculative decoding, on by default:** each model's MTP head, or a DFlash 2 drafter - **288 t/s** writing
-  prose with Inkling 2 Mini on one card, **377 t/s** on two; **167 t/s** writing code with Qwen3.8-27B on one card.
+- **Fast speculative decoding, on by default:** each model's MTP head, or a DFlash 2 drafter - **282 t/s** writing
+  prose with Inkling 2 Mini on one card, **395 t/s** on two; **167 t/s** writing code with Qwen3.8-27B on one card.
 - **Fast prompts:** up to **11,223 t/s** prefill on one card (Ornith 1.5), **7,194 t/s** on two (Inkling 2 Mini).
 - **Long context on modest hardware:** Qwen3.8-27B's full 262,144 tokens on **a single 32 GB card**; Inkling 2 Mini's
   full **1M tokens** on two.
@@ -24,8 +24,8 @@ One session, greedy, served, tokens a second. All setups, more context lengths a
 
 | model | setup | prefill | code | prose | tool calls |
 |---|---|---:|---:|---:|---:|
-| Inkling 2 Mini | one card, DFlash 2 | 4,932 (4k, int8) | **221** | **288** | **176** |
-| Inkling 2 Mini | two cards, DFlash 2 (`tp`; prefill `pp`) | 7,194 (16k, int8) | **275** | **377** | **219** |
+| Inkling 2 Mini | one card, DFlash 2 | 4,932 (4k, int8) | **232** | **282** | **179** |
+| Inkling 2 Mini | two cards, DFlash 2 (`tp`; prefill `pp`) | 7,194 (16k, int8) | **275** | **395** | **244** |
 | Qwen3.8-27B | one card, DFlash 2 | 2,800 (4k, int8) | **167** | 67 | 118 |
 | Qwen3.8-27B | two cards `tp`, DFlash 2 | 3,467 (4k, int8) | 182 | **89** | **153** |
 | Ornith 1.5 35B-A3B | one card, MTP | **11,223** (4k) | **320** | **341** | **287** |
@@ -56,7 +56,7 @@ The host needs Linux with the `xe` kernel driver (the container uses the host's 
 from kernel 7.4). The image brings the rest:
 
 ```sh
-docker pull urakozz/intel-arc-inference-server:1.2.0
+docker pull urakozz/intel-arc-inference-server:1.2.1
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
 # Qwen3.8-Flash-Next, about 133 GB: skips 96 GB of the bf16 n-gram table, which only other engines read
@@ -82,8 +82,8 @@ from Intel's graphics PPA `ppa:kobuk-team/intel-graphics` or the distro) and the
 1.34.0 or newer); glibc 2.43 or newer. See the tarball's own README.md for details.
 
 ```sh
-tar -xzf intel-inference-server-1.2.0-linux-x86_64.tar.gz
-./intel-inference-server-1.2.0/bin/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+tar -xzf intel-inference-server-1.2.1-linux-x86_64.tar.gz
+./intel-inference-server-1.2.1/bin/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
     --prefix-split-last --kv-cache int8
 ```
 
@@ -103,7 +103,7 @@ ctest --test-dir build
 # an OpenAI-compatible server on port 8000 (built from source: ./build/src/cli/b70-serve in place of $B70);
 # GET /health answers 503 while the model loads, 200 once it serves
 B70="docker run --rm --device /dev/dri --group-add $(getent group render | cut -d: -f3) \
-    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.2.0"
+    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.2.1"
 
 # Qwen3.8-Flash-Next on two cards: every layer split over both, the experts in host RAM computed on the CPU (the
 # defaults: the fastest session), MTP on

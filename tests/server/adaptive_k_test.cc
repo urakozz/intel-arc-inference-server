@@ -18,6 +18,7 @@ namespace {
 using server::AdaptiveK;
 using server::AdaptiveKOptions;
 using server::DraftCalib;
+using server::LiveCost;
 using server::MtpCost;
 
 // Drives a policy for `n` iterations; `accept(k)` says how many of k drafts were kept.
@@ -398,6 +399,48 @@ void test_deal_by_cost() {
               rows(low), rows(mid));
 }
 
+// The round costs the server measures (LiveCost): the prior until a round is timed, a load-time seed in plain steps of
+// its own plain step and scaling the deeper prior, rounds averaged in, a stall dropped, a depth reached only by drafted
+// rounds priced over a plain step estimated from the prior's ratios; AdaptiveK reads it in place of its table.
+void test_live_cost() {
+  MtpCost shallow, deep;
+  shallow.verify = {1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7};
+  shallow.draft.assign(7, 0.2);
+  deep.verify = {1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4};
+  deep.draft.assign(7, 0.1);
+  LiveCost live({{4096, shallow}, {1u << 20, deep}});
+  CHECK_NEAR(live.at(4096).verify[7], 1.7, 1e-12);
+  CHECK_NEAR(live.at(1u << 20).draft[6], 0.1, 1e-12);
+  live.seed(4096, {10, 11, 12, 13, 14, 15, 16, 18}, 3.0);   // 8 rows 1.8 plain steps, the draft 0.3
+  CHECK_NEAR(live.at(4096).verify[7], 1.8, 1e-12);
+  CHECK_NEAR(live.at(4096).draft[0], 0.3, 1e-12);
+  CHECK_NEAR(live.at(1u << 20).verify[7], 2.4 * 1.8 / 1.7, 1e-12);   // the deep prior scaled by the seed's ratio
+  CHECK_NEAR(live.at(1u << 20).draft[3], 0.1 * 0.3 / 0.2, 1e-12);
+  for (int i = 0; i < 400; ++i) live.verify(4096, 8, 20.0);   // the seed averaged out over ~kWindow rounds
+  live.verify(4096, 8, 1000.0);   // a stall
+  CHECK_NEAR(live.at(4096).verify[7], 2.0, 1e-3);
+  for (int i = 0; i < 8; ++i) {   // 1 Mi: only K 7 rounds, the plain step from the 8-row time over its prior ratio
+    live.verify(1u << 20, 8, 48.0);
+    live.draft(1u << 20, 7, 2.0);
+  }
+  const double plain = 48.0 / (2.4 * 1.8 / 1.7);
+  CHECK_NEAR(live.at(1u << 20).verify[7], 2.4 * 1.8 / 1.7, 1e-9);
+  CHECK_NEAR(live.at(1u << 20).draft[0], 2.0 / plain, 1e-9);   // an untimed K: the timed Ks' mean
+  AdaptiveKOptions o;
+  o.max_k = 7;
+  o.cost = shallow;
+  o.warmup = 0;
+  o.probe_every = 0;
+  MtpCost dear = shallow;
+  dear.draft.assign(7, 10.0);
+  o.live = [&](uint32_t) { return dear; };
+  AdaptiveK k(o);
+  (void)k.next(4096);
+  k.observe(7, 7);
+  CHECK_EQ(k.current(), 0u);   // at ten plain steps a draft pass, plain whatever the table says
+  std::print("live costs: seeded, averaged, a stall dropped, the deep plain step estimated; AdaptiveK reads them\n");
+}
+
 int main() {
   test_deal_by_cost();
   test_model();
@@ -407,6 +450,7 @@ int main() {
   test_depth_costs();
   test_inkling_policy();
   test_inkling_tables_equal();
+  test_live_cost();
   test_measured_cost();
   test_up_on_high_acceptance();
   test_down_on_low_acceptance();

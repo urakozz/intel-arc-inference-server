@@ -245,11 +245,18 @@ inline std::string inkling_select_variant(bool split = false) {
 // One card and pp: the exact int8 rescore of the 2-bit head's 64 candidates a row (kernels::inkling2::kHeadCandidates),
 // the head's k-major tiles.
 inline std::string inkling_rerank_variant() { return "df_rerank_R7_K2304_U200058_C64_Q4"; }
-// `--parallel tp`: df_topk over a card's half of the head's rows (card 1's live ones end at 200058; ink_df_topk_merge
-// joins the two cards' lists).
-inline std::string inkling_tp_topk_variant(unsigned rank) {
+// `--parallel tp`: one card's candidates on a card's half of the head's rows (card 1's live ones end at 200058) - the
+// 2-bit pass's 64 a row and their exact rescore on the half's k-major tiles, ids the half's (ink_df_topk_merge joins
+// the two cards' lists).
+inline unsigned inkling_tp_used(unsigned rank) {
   constexpr unsigned half = kInklingHeadRows / 2;
-  return topk_variant(half, rank ? kInkling.used - half : half);
+  return rank ? kInkling.used - half : half;
+}
+inline std::string inkling_tp_candidate_variant(unsigned rank) {
+  return "df_candidate_R7_N" + s_(kInklingHeadRows / 2) + "_U" + s_(inkling_tp_used(rank)) + "_K64";
+}
+inline std::string inkling_tp_rerank_variant(unsigned rank) {
+  return "df_rerank_R7_K2304_U" + s_(inkling_tp_used(rank)) + "_C64_Q4";
 }
 // The drafter's linears at the block's 8 rows (int8 at load, one scale a row; L1) - q || k || v and gate ||
 // up concatenated (loader::Inkling2Checkpoint) - and the context projection's at its 1..8 committed rows: fc over the

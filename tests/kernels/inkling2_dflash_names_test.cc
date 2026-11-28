@@ -26,7 +26,11 @@ int main() {
   };
   for (bool int4 : {false, true})
     for (const std::string& v : kd::inkling_dflash2_variants(int4)) built(v);
-  for (unsigned rank = 0; rank < 2; ++rank) built(kd::inkling_tp_topk_variant(rank));   // tp: the head by rows
+  for (unsigned rank = 0; rank < 2; ++rank) {   // tp: the head by rows
+    built(kd::inkling_tp_candidate_variant(rank));
+    built(kd::inkling_tp_rerank_variant(rank));
+  }
+  built(kernels::gemm_sm_variant(7, *kernels::small_m_tuning(2304, kd::kInklingHeadRows / 2, 1, 3)));
   // the int8 linears (L1) as the engine binds them: gemm_sm_i8w at 2..8 rows, gemv_i8w at one
   for (const auto& [K, N] : kd::inkling_linear_shapes()) built(kernels::inkling2::int8(8, K, N));
   for (unsigned m = 1; m <= 8; ++m) {   // the context projection at every committed width
@@ -41,8 +45,10 @@ int main() {
   CHECK(kd::inkling_select_variant(true) == "df_select_M8_K16_Q16_RK256_V201024_H12_CAP30");
   CHECK(kd::prep_variant(kd::kInkling, true) == "df_prep_M8_H2304_I6912_Q32KV8_D128_G16T2_R2048_V201024_F8Q4R4U4C12H12K4");
   CHECK(kd::inkling_rerank_variant() == "df_rerank_R7_K2304_U200058_C64_Q4");
-  CHECK(kd::inkling_tp_topk_variant(0) == "df_topk_R7_N100032_U100032" &&
-        kd::inkling_tp_topk_variant(1) == "df_topk_R7_N100032_U100026");
+  CHECK(kd::inkling_tp_candidate_variant(0) == "df_candidate_R7_N100032_U100032_K64" &&
+        kd::inkling_tp_candidate_variant(1) == "df_candidate_R7_N100032_U100026_K64");
+  CHECK(kd::inkling_tp_rerank_variant(0) == "df_rerank_R7_K2304_U100032_C64_Q4" &&
+        kd::inkling_tp_rerank_variant(1) == "df_rerank_R7_K2304_U100026_C64_Q4");
   CHECK(kd::kInkling.ntaps * kd::kInkling.H == 9216 && kd::kQwen38.ntaps == 5 && kd::kFlashNext.ntaps == 5);
   CHECK(kd::select_variant(true, kd::kFlashNext) == "df_select_M8_K16_Q16_RK256_V248320");
   std::printf("inkling2_dflash_names_test: %zu bindings, every binary compiled: OK\n", n);

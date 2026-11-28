@@ -64,7 +64,8 @@ ENV B70_OCLOC_CACHE=0 CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,id=b70-ccache,target=/root/.cache/ccache \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-    && cmake --build build -j"$(nproc)"
+    && cmake --build build -j"$(nproc)" \
+    && find build/kernels -name '*.spv' -delete   # the SPIR-V is a build step; the engine loads only the .bin files
 
 # ---- Runtime -------------------------------------------------------------------------------------------------------
 FROM ${UBUNTU} AS runtime

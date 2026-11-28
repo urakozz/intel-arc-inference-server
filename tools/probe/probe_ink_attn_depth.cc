@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
   for (size_t a = 0; a < arms.size(); ++a) {
     Arm& arm = arms[a];
     arm.binary = argv[4 + a];
-    arm.kv8 = arm.binary.find("KV8") != std::string::npos;
+    arm.kv8 = arm.binary.find("_KV8") != std::string::npos;   // not the head shape's Q24KV8
     arm.split = arm.binary.ends_with("_SPLIT");
     arm.verify = arm.binary.ends_with("_VERIFY");
     const auto t = arm.binary.find("_T");

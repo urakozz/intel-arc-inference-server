@@ -184,7 +184,115 @@ __kernel void kol_route(__global const ushort* restrict weights, __global const 
   }
   if (lane < ROUTE_SLOTS) lr[lane] = red[0][lane];
   barrier(CLK_LOCAL_MEM_FENCE);
+#elif ROUTE_CAND
+// ROUTE_CAND (PERF-28, Inkling: 128 experts, top 8, a lane each, 8 sub-groups): only the candidates are ranked - the
+// experts at or above the smallest of the 8 sub-group maxima. Those 8 maxima are 8 experts at or above it, so every
+// expert of the top 8 is a candidate, and every expert that outranks a candidate is one too: a candidate's rank over
+// the candidates is its rank over all 128. The rank-8 selection value (`next`) is a candidate's when there are 9 or
+// more, else the largest of the rest. Then the 8 slots a lane each, the sums and stores in kol_route's order: bitwise.
+#if ROUTE_EPL != 1 || ROUTE_WG != 128 || ROUTE_K != 8 || ROUTE_E != ROUTE_SLOTS
+#error "kol_route ROUTE_CAND: 128 experts a lane each, top 8"
+#endif
+__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
+KOL_SG16
+__kernel void kol_route(__global const float* restrict logits, __global const float* restrict bias,
+                        __global uint* restrict route) {
+  const uint m = get_group_id(1);
+  const uint e = get_local_id(0), sg = get_sub_group_id();
+  __local float sg_max[ROUTE_WG / SG], rest_max[ROUTE_WG / SG];
+  __local uint n_cand, cand_id[ROUTE_SLOTS];
+  __local float cand_sel[ROUTE_SLOTS];
+  __local uint top_id[ROUTE_K + 1], slot_id[8];
+  __local float top_sel[ROUTE_K + 1], slot_l[8], slot_w[8], slot_s[8];
+  const __global float* restrict lr = logits + (size_t)m * ROUTE_LN;
+  const float logit = lr[e];
+#if ROUTE_RENORM
+  const float sel = sigmoid_f32(logit) + bias[e];
 #else
+  const float sel = logit + bias[e];
+#endif
+  if (e <= ROUTE_K) {   // a defined row even if NaNs break the ranking
+    top_id[e] = e;
+    top_sel[e] = -INFINITY;
+  }
+  if (e == 0) n_cand = 0;
+  const float mx = sub_group_reduce_max(sel);
+  if (get_sub_group_local_id() == 0) sg_max[sg] = mx;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float floor_sel = sg_max[0];
+  for (uint s2 = 1; s2 < ROUTE_WG / SG; ++s2) floor_sel = fmin(floor_sel, sg_max[s2]);
+  const bool cand = sel >= floor_sel;
+  if (cand) {
+    const uint c = atomic_inc(&n_cand);
+    cand_id[c] = e;
+    cand_sel[c] = sel;
+  }
+  const float rest = sub_group_reduce_max(cand ? -INFINITY : sel);
+  if (get_sub_group_local_id() == 0) rest_max[sg] = rest;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint nc = n_cand;
+  if (cand) {
+    uint rank = 0;
+    for (uint c = 0; c < nc; ++c) {
+      const float s = cand_sel[c];
+      const uint j = cand_id[c];
+      rank += (s > sel || (s == sel && j < e)) ? 1u : 0u;
+    }
+    if (rank <= ROUTE_K) {
+      top_id[rank] = e;
+      top_sel[rank] = sel;
+    }
+  }
+  if (e == 0 && nc == ROUTE_K) {
+    float r = rest_max[0];
+    for (uint s2 = 1; s2 < ROUTE_WG / SG; ++s2) r = fmax(r, rest_max[s2]);
+    top_sel[ROUTE_K] = r;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  __global uint* restrict r = route + (size_t)m * RW;
+  // The TOP_K ranks re-ordered by expert id: slot j's rank is the one with exactly j smaller ids.
+  if (e < ROUTE_K) {
+    const uint j = e;
+    uint id = 0u, found = 0u;
+    float sb = 0.f;
+    for (uint k = 0; k < ROUTE_K; ++k) {
+      uint smaller = 0;
+      for (uint k2 = 0; k2 < ROUTE_K; ++k2) smaller += top_id[k2] < top_id[k] ? 1u : 0u;
+      if (smaller == j) {
+        id = top_id[k];
+        sb = top_sel[k];
+        found = 1u;
+      }
+    }
+    const float l = lr[id];
+    slot_id[j] = id;
+    slot_l[j] = found ? l : INFINITY;   // kol_route's empty slot: no weight, lmin untouched
+    slot_w[j] = found ? sigmoid_f32(l) : 0.f;
+    slot_s[j] = sb;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (e < ROUTE_K) {
+#if ROUTE_RENORM
+    float sum = 0.0f;
+    for (uint k = 0; k < ROUTE_K; ++k) sum += slot_w[k];
+    r[R_W + e] = as_uint((slot_w[e] / (sum + 1e-20f)) * ROUTE_SCALE);
+#else
+    r[R_W + e] = as_uint(slot_w[e]);
+#endif
+    r[R_IDS + e] = slot_id[e];
+    r[R_SEL + e] = as_uint(slot_s[e]);
+  } else if (e == ROUTE_K) {
+    float lmin = INFINITY;
+    for (uint k = 0; k < ROUTE_K; ++k) lmin = fmin(lmin, slot_l[k]);
+    r[R_NEXT] = as_uint(top_sel[ROUTE_K]);
+    r[R_LMIN] = as_uint(lmin);
+  } else if (e > R_LMIN && e < RW) {
+    r[e] = 0u;
+  }
+}
+#endif
+#if !ROUTE_CAND
+#if !INK_ROUTE_M1
 __attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
 __kernel void kol_route(__global const float* restrict logits, __global const float* restrict bias,
                         __global uint* restrict route) {
@@ -260,6 +368,7 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
     for (uint k = R_LMIN + 1; k < RW; ++k) r[k] = 0u;
   }
 }
+#endif  // !ROUTE_CAND
 #endif  // ROUTE_E
 
 // ---------------------------------------------------------------------------------------
@@ -676,6 +785,31 @@ __kernel void kol_moe_union_finish(__global const uint* route, __global const fl
                                   __global const float* history, __global const float* taps,
                                   __global float* pending, __global float* residual, __global ushort* draft_tap) {
   const uint i = get_global_id(0);
+#if INK_MOE_FINISH_RSPLIT && !INK_MOE_TP_SUM
+  // PERF-38 (Inkling one card): grid (HIDDEN / 128, M), a work-group a row; row r's convolution inputs r - 3 .. r
+  // summed again here in slot order (the serial walk's sums), so every value is the walk's: bitwise.
+  const uint r = get_group_id(1);
+  float x[4];
+  for (uint tap = 0; tap < 4; ++tap) {
+    const int t = (int)r + (int)tap - 3;
+    float v = 0.f;
+    if (t < 0) {
+      v = history[(t + 3) * HIDDEN + i];
+    } else {
+      for (uint j = 0; j < MOE_K; ++j)
+        v += expert_out[((size_t)t * MOE_K + j) * HIDDEN + i] * as_float(route[t * RW + R_W + j]);
+    }
+    x[tap] = v;
+  }
+  pending[(size_t)r * HIDDEN + i] = x[3];
+  float sum = 0.f;
+  for (uint tap = 0; tap < 4; ++tap) sum += taps[i * 4 + tap] * x[tap];
+  const size_t at = (size_t)r * HIDDEN + i;
+  const float value = residual[at] + (x[3] + sum) / sqrt(5.f);
+  residual[at] = value;
+  if (draft_tap) draft_tap[(size_t)r * 4 * HIDDEN + i] = rne_bf16(value);
+  return;
+#endif
   float rows[M] = {0};
 #pragma unroll
   for (uint r = 0; r < M; ++r) {

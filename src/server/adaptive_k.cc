@@ -104,15 +104,15 @@ MtpCost MtpCost::inkling_dspark() {
 
 MtpCost MtpCost::inkling_dflash2() {
   MtpCost c;
-  c.verify = {1.000, 1.167, 1.355, 1.503, 1.679, 1.826, 1.963, 2.175};
-  c.draft.assign(7, 0.232);
+  c.verify = {1.000, 1.170, 1.360, 1.476, 1.614, 1.761, 1.872, 1.960};
+  c.draft.assign(7, 0.145);
   return c;
 }
 
 MtpCost MtpCost::inkling_dflash2_tp() {
   MtpCost c;
-  c.verify = {1.000, 1.134, 1.275, 1.405, 1.552, 1.663, 1.796, 2.027};
-  c.draft.assign(7, 0.290);
+  c.verify = {1.000, 1.097, 1.246, 1.363, 1.477, 1.586, 1.663, 1.778};
+  c.draft.assign(7, 0.213);
   return c;
 }
 
@@ -239,7 +239,10 @@ MtpCost cost_at_depth(const std::vector<std::pair<uint32_t, MtpCost>>& by_depth,
 }
 
 uint32_t AdaptiveK::next(uint32_t pos) {
-  if (!o_.by_depth.empty()) o_.cost = cost_at_depth(o_.by_depth, pos);
+  if (o_.live)
+    o_.cost = o_.live(pos);
+  else if (!o_.by_depth.empty())
+    o_.cost = cost_at_depth(o_.by_depth, pos);
   if (iters_ < o_.warmup) return max_k_;
   // Timed but no plain step yet: one, so the costs the request measures have their unit (it never runs one at K > 0).
   if (timed_ && sec_[0] == 0 && cur_ > 0) return 0;
@@ -276,6 +279,85 @@ void AdaptiveK::observe(uint32_t k, uint32_t accepted, double seconds) {
     probe_gap_ = accepted == 0 ? std::min(probe_gap_ * 2, std::max(o_.probe_max, o_.probe_every)) : o_.probe_every;
   else if (probe && sec_[1] > 0 && sec_[0] > 0)   // the probe did not pay at this request's own cost: wait longer
     probe_gap_ = std::min(probe_gap_ * 2, std::max(o_.probe_max, o_.probe_every));
+}
+
+LiveCost::LiveCost(std::vector<std::pair<uint32_t, MtpCost>> prior) : prior_(std::move(prior)) {
+  if (prior_.empty() || prior_.front().second.verify.size() != kRows || prior_.front().second.draft.size() != kRows - 1)
+    throw std::invalid_argument("LiveCost: the prior is a table by depth of 8 verify widths and 7 drafts");
+}
+
+namespace {
+uint32_t depth_index(uint32_t pos) {
+  if (pos <= LiveCost::kFirstDepth) return 0;
+  const long i = std::lround(std::log2(double(pos) / LiveCost::kFirstDepth));
+  return uint32_t(std::min<long>(i, LiveCost::kDepths - 1));
+}
+}  // namespace
+
+void LiveCost::Mean::add(double x) {
+  if (!(x > 0) || (n >= 4 && x > 4 * ms)) return;
+  n = std::min(n + 1, kWindow);
+  ms += (x - ms) / n;
+}
+
+void LiveCost::seed(uint32_t pos, const std::array<double, kRows>& verify_ms, double draft_ms) {
+  const std::lock_guard lock(mu_);
+  const MtpCost p = cost_at_depth(prior_, pos);
+  for (auto& [depth, c] : prior_) {
+    for (uint32_t m = 1; m < kRows; ++m) c.verify[m] *= verify_ms[m] / verify_ms[0] / p.verify[m];
+    for (auto& d : c.draft) d *= draft_ms / verify_ms[0] / p.draft.back();
+  }
+  Depth& d = d_[depth_index(pos)];
+  for (uint32_t m = 0; m < kRows; ++m) d.verify[m] = {verify_ms[m], kWindow / 4};
+  d.draft.back() = {draft_ms, kWindow / 4};
+}
+
+void LiveCost::verify(uint32_t pos, uint32_t rows, double ms) {
+  if (rows == 0 || rows > kRows) return;
+  const std::lock_guard lock(mu_);
+  d_[depth_index(pos)].verify[rows - 1].add(ms);
+}
+
+void LiveCost::draft(uint32_t pos, uint32_t k, double ms) {
+  if (k == 0 || k > kRows - 1) return;
+  const std::lock_guard lock(mu_);
+  d_[depth_index(pos)].draft[k - 1].add(ms);
+}
+
+MtpCost LiveCost::cost(uint32_t i) const {
+  const MtpCost p = cost_at_depth(prior_, kFirstDepth << i);
+  const Depth& d = d_[i];
+  double plain = d.verify[0].n ? d.verify[0].ms : 0;
+  uint32_t timed = 0;
+  for (uint32_t m = 1; m < kRows && !d.verify[0].n; ++m)
+    if (d.verify[m].n) {
+      plain += d.verify[m].ms / p.verify[m];
+      ++timed;
+    }
+  if (timed) plain /= timed;
+  double draft = 0;   // the timed Ks' mean stands in for an untimed K (the DFlash 2 pass drafts its block whole)
+  uint32_t drafts = 0;
+  for (const Mean& x : d.draft)
+    if (x.n) {
+      draft += x.ms;
+      ++drafts;
+    }
+  if (!(plain > 0) && drafts) plain = draft / drafts / p.draft.back();
+  if (!(plain > 0)) return p;
+  MtpCost c = p;
+  for (uint32_t m = 1; m < kRows; ++m)
+    if (d.verify[m].n) c.verify[m] = d.verify[m].ms / plain;
+  for (uint32_t k = 0; k + 1 < kRows; ++k)
+    if (d.draft[k].n) c.draft[k] = d.draft[k].ms / plain;
+    else if (drafts) c.draft[k] = draft / drafts / plain;
+  return c;
+}
+
+MtpCost LiveCost::at(uint32_t pos) const {
+  const std::lock_guard lock(mu_);
+  std::vector<std::pair<uint32_t, MtpCost>> by_depth;
+  for (uint32_t i = 0; i < kDepths; ++i) by_depth.emplace_back(kFirstDepth << i, cost(i));
+  return cost_at_depth(by_depth, pos);
 }
 
 }  // namespace server

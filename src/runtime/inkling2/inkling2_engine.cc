@@ -147,10 +147,11 @@ void Engine::linear(l0::CmdList& list, const std::string& name, uint32_t rows, c
            input, output);
   } else if (rows == 1 || w.N == k::kTapColumns) {
     // The full visits' 64-column tap projections stay on gemv_i8w at every width (one gemm_sm work-group took 52 us
-    // at 2 rows); at the verify's rows its K split in 16 (kTapKSplit).
-    const uint32_t wg = rows == 1 ? 64 : 64 * k::kTapKSplit;
-    launch(list, kernels::gemv_i8w_variant(rows, w.K, w.N), "gemv_i8w", wg, w.N / 64, 1, at(mem, w.offset),
-           at(mem, w.scales), input, output);
+    // at 2 rows), their K split in 16 (kTapKSplit) at every row count.
+    const bool tap = w.N == k::kTapColumns;
+    const uint32_t wg = tap ? 64 * k::kTapKSplit : 64;
+    launch(list, kernels::gemv_i8w_variant(rows, w.K, w.N) + (tap && rows == 1 ? "_KS" : ""), "gemv_i8w", wg,
+           w.N / 64, 1, at(mem, w.offset), at(mem, w.scales), input, output);
   } else {
     const auto& t = *kernels::small_m_tuning(w.K, w.N, 1, 2);
     launch(list, k::int8(rows, w.K, w.N), "gemm_sm_i8w", kernels::gemm_sm_wg_size(t), w.N / kernels::gemm_sm_cols(t),
@@ -332,6 +333,8 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
     const auto* r_scale = static_cast<const std::byte*>(weight(a + "rel_l2_clip.scale")) + q0 * D::relative_dim * f32;
     const uint32_t ring = v.window ? kRing : 0;
     const auto attn = (tp_.on() ? k::tp_attn(m, bool(v.window)) : k::attn(m, bool(v.window))) + (kv8 ? "_KV8" : "");
+    const uint32_t row_split = tp_.on() && m > 1 ? k::kTpAttnRowSplit : 1;   // the rows over grid z (ATTN_RSPLIT)
+    const auto attn_decode = attn + (row_split > 1 ? "_RS2" : "");
     const std::string prep_variant = tp_.on() ? std::string(k::kTpPrep) : prep;
     auto* part = s.attention_parts->ptr();
     // A deep verify's full visit: the split prompt flash over the same q, keys and partials area (kVerifySpans x
@@ -351,8 +354,8 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
         launch_3d(list, verify, "kol_pf_flash_attn", k::kPrefillAttnGroup, 1, D::kv_heads, kVerifySpans, q, ck, cv, ks,
                   vs, s.attn_output->ptr(), ctrl_, relative, weight(a + "rel_logits_proj.proj"), sinks, g, part);
       else
-        launch(list, attn, "kol_attn_decode", 128, tp_.kv_heads(), k::kPartitions, ctrl_, q, ck, cv, ks, vs, part,
-               relative, weight(a + "rel_logits_proj.proj"));
+        launch_3d(list, attn_decode, "kol_attn_decode", 128, tp_.kv_heads(), k::kPartitions, row_split, ctrl_, q, ck,
+                  cv, ks, vs, part, relative, weight(a + "rel_logits_proj.proj"));
     } else {
       launch(list, prep_variant, "ink_qkv_prep", 128, tp_.q_heads() + 2 * tp_.kv_heads(), m,
              q, relative, q_scale, r_scale, fresh.k, fresh.v, at(p.conv_k, kh), at(p.conv_v, kh), k_taps, v_taps,
@@ -362,8 +365,8 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
         launch_3d(list, verify, "kol_pf_flash_attn", k::kPrefillAttnGroup, 1, D::kv_heads, kVerifySpans, q, ck, cv,
                   s.attn_output->ptr(), ctrl_, relative, weight(a + "rel_logits_proj.proj"), sinks, g, part);
       else
-        launch(list, attn, "kol_attn_decode", 128, tp_.kv_heads(), k::kPartitions, ctrl_, q, ck, cv, part,
-               relative, weight(a + "rel_logits_proj.proj"));
+        launch_3d(list, attn_decode, "kol_attn_decode", 128, tp_.kv_heads(), k::kPartitions, row_split, ctrl_, q, ck,
+                  cv, part, relative, weight(a + "rel_logits_proj.proj"));
     }
     if (flash)
       launch(list, verify, "kol_pf_flash_merge", D::head_dim, D::q_heads, m, part, s.attn_output->ptr(), ctrl_,
@@ -424,7 +427,7 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
     // pass through the head's buffer, which the head writes only after the last visit.
     launch(list, k::route() + "_M1_FUSED", "kol_route_logits", 16 * k::kRouteSplit, 8, m,
            weight(layer + "mlp.gate.weight"), activ(0), s.logits->ptr());
-    launch(list, k::route(), "kol_route", 128, 1, m, s.logits->ptr(), route_bias, route);
+    launch(list, k::route_select(), "kol_route", 128, 1, m, s.logits->ptr(), route_bias, route);
     const auto moe = tp_.on() ? k::tp_moe(m, desc_.expert_format[l]) : k::moe(m, desc_.expert_format[l]);
     auto* expert = s.expert_hidden->ptr();
     void* draft_tap = nullptr;
@@ -472,7 +475,7 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
              weight(layer + "mlp.experts.w13_weight"), expert);
       launch(list, moe, "kol_moe_union_down", 64, D::hidden / 64, m * D::top_k, plan, expert,
              weight(layer + "mlp.experts.w2_weight"), expert_out);
-      launch(list, moe, "kol_moe_union_finish", 128, D::hidden / 128, 1, route, expert_out,
+      launch(list, moe, "kol_moe_union_finish", 128, D::hidden / 128, m, route, expert_out,
              at(p.conv_mlp, ah), weight(layer + "mlp_sconv.weight"), fresh.mlp, next, draft_tap);
     }
     std::swap(current, next);
@@ -940,15 +943,24 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
   // rows 1..7 through the target's head; the top 16 of its 200058 live rows, raw (the cap is the selector's)
   auto* rows = static_cast<std::byte*>(s.x) + H * bf16;
   if (tp_.on()) {
-    // tp: the card's half of the head's rows and its top 16 a row, the two cards' lists through one all-reduce row
-    // into the stage-1 parts (spent by then), merged on both into the whole head's top 16
-    const auto [w, sc] = head_half(root + "unembed.weight");
-    launch(list, std::string(k::kTpDraftHead), "gemm_sm_i8w", 64, k::kTpHeadHalf / 64, 1, w, sc, rows,
+    // tp: one card's form on the card's half of the head's rows (the 2-bit copy's tiles of those rows, its top
+    // kCandidates a row, their exact int8 dots reranked to the half's top 16), the two cards' lists through one
+    // all-reduce row into the stage-1 parts (spent by then), merged on both into the whole head's top 16
+    const auto& t2 = *kernels::small_m_tuning(D::hidden, k::kTpHeadHalf, 1, 3);
+    auto* half2 = at(*buffers_.weights.candidate_head, kCandidateHeadBytes / D::head_rows * tp_.rank * k::kTpHeadHalf);
+    auto* cpart = at(*buffers_.scratch.head_candidates);
+    auto* ids = at(*buffers_.scratch.head_candidates, kCandidateParts);
+    launch(list, kernels::gemm_sm_variant(m - 1, t2), "gemm_sm", kernels::gemm_sm_wg_size(t2),
+           k::kTpHeadHalf / kernels::gemm_sm_cols(t2), kernels::gemm_sm_grid_y(t2), half2, half2, rows,
            d.draft_logits->ptr());
-    const std::string topk = kd::inkling_tp_topk_variant(tp_.rank), recurrent = k::tp_draft_recurrent(tp_.rank);
-    launch(list, topk, "df_topk_stage1", 256, (k::kTpHeadHalf + kd::kTopkChunk - 1) / kd::kTopkChunk, m - 1,
-           d.draft_logits->ptr(), s.tpart);
-    launch(list, topk, "df_topk_stage2", 256, m - 1, 1, s.tpart, 1.f, 0.f, s.cand, s.unary);
+    const std::string cands = kd::inkling_tp_candidate_variant(tp_.rank);
+    launch(list, cands, "df_candidate_select1", 256, (k::kTpHeadHalf + kCandidateChunk - 1) / kCandidateChunk, m - 1,
+           d.draft_logits->ptr(), cpart);
+    launch(list, cands, "df_candidate_select2", 256, m - 1, 1, cpart, ids);
+    const auto [w, sc] = head_half(root + "unembed.weight");
+    launch(list, kd::inkling_tp_rerank_variant(tp_.rank), "df_rerank", kCandidates * 4, m - 1, 1, w, sc, rows, ids,
+           1.f, 0.f, s.cand, s.unary);
+    const std::string recurrent = k::tp_draft_recurrent(tp_.rank);
     auto* part = buffers_.tp.tp_part->ptr();
     launch(list, recurrent, "ink_df_topk_tp", 256, D::hidden / 256, 1, s.cand, s.unary, part);
     record_all_reduce(list, 1, part, s.tpart);

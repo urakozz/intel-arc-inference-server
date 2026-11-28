@@ -90,6 +90,21 @@
 #if PAIR && (EAGER || !INK_PREFILL || KT != 64 || RPW != 16)
 #error "kol_pf_attn PAIR: Inkling's default path (INK_PREFILL, not EAGER), KT 64, RPW 16"
 #endif
+// PAIR_K2D / PAIR_V2D (PERF-98 for Inkling; undefined on every other command line): the bf16 PAIR form's K and V
+// operands by 2D block reads instead of one row a lane / one 64-dim row a key - K a key atom's 16 dims in one transposed
+// 32-bit read (lane = key, the words of pf_flash_attn's PAIR), V two key atoms x two dim atoms in one VNNI-transform
+// read. The same words reach the same DPAS in the same order: bitwise. Rows past the surface read as zeros (keys past
+// depth: masked scores, P 0); on a ring the last tile's surface ends at depth's slot (a tile never wraps), so no slot
+// past depth (an older key, or memory never written) reaches P V.
+#ifndef PAIR_K2D
+#define PAIR_K2D 0
+#endif
+#ifndef PAIR_V2D
+#define PAIR_V2D 0
+#endif
+#if (PAIR_K2D || PAIR_V2D) && !(PAIR && !KV8)
+#error "kol_pf_attn PAIR_K2D / PAIR_V2D: the bf16 PAIR form"
+#endif
 #ifndef KV8_SHARE
 #define KV8_SHARE 0
 #endif
@@ -420,9 +435,16 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
     for (uint kk = 0; kk < NDA; ++kk)
 #pragma unroll
       for (uint bb = 0; bb < 2u; ++bb) {
+#if PAIR_K2D
+        uint kb[8];
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)Kc, KV_HEADS * HD * 2, SLIDING ? RING : (int)depth,
+            KV_HEADS * HD * 2, (int2)((int)((j * HD + 16u * kk) / 2u), (int)KROW(t0 + 16u * (2u * k + bb))), kb);
+        const int8 kw = as_int8(vload8(0, kb));
+#else
         const uint row = KROW(min(t0 + 16u * (2u * k + bb) + l, depth - 1));
         const __global uint* words = (const __global uint*)(Kc + (size_t)row * KV_HEADS * HD + j * HD + 16u * kk);
         const int8 kw = as_int8(vload8(0, words));
+#endif
 #pragma unroll
         for (uint rb = 0; rb < 2u; ++rb)
           sacc[rb][bb] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[rb][kk], kw, sacc[rb][bb]);
@@ -604,6 +626,40 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
             for (uint rb = 0; rb < 2u; ++rb) {
               o[rb][dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[rb][ks], vv, o[rb][dd + c]);
               o[rb][dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl[rb][ks], vv, o[rb][dd + c]);
+            }
+          }
+      }
+    }
+#elif PAIR_V2D
+#pragma unroll
+    for (uint b = 0; b < NKA; b += 2) {
+      short8 pa[2][2], pl[2][2];
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+        for (uint ks = 0; ks < 2u; ++ks) {
+          pa[rb][ks] = as_short8(intel_sub_group_block_read_us8(sp + (rb * 4u + b + ks) * 128u));
+          pl[rb][ks] = as_short8(intel_sub_group_block_read_us8(sp + 1024u + (rb * 4u + b + ks) * 128u));
+        }
+#pragma unroll
+      for (uint dp = 0; dp < 4u; dp += 2) {
+        uint vb[32];   // vb[16 c + 8 ks + z]: keys 16 (b + ks) + 2 z, + 1 of dim atom 4 k + dp + c (lane = dim)
+#if SLIDING
+        const int v_h = t0 + KT > depth ? (int)KROW(depth - 1u) + 1 : RING;
+#else
+        const int v_h = (int)depth;
+#endif
+        intel_sub_group_2d_block_read_transform_16b_32r16x2c((__global void*)Vc, KV_HEADS * HD * 2, v_h,
+            KV_HEADS * HD * 2, (int2)((int)(j * HD + 64u * k + 16u * dp), (int)KROW(t0 + 16u * b)), vb);
+#pragma unroll
+        for (uint ks = 0; ks < 2u; ++ks)
+#pragma unroll
+          for (uint c = 0; c < 2u; ++c) {
+            const int8 vv = as_int8(vload8(0, vb + c * 16u + 8u * ks));
+#pragma unroll
+            for (uint rb = 0; rb < 2u; ++rb) {
+              o[rb][dp + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[rb][ks], vv, o[rb][dp + c]);
+              o[rb][dp + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl[rb][ks], vv, o[rb][dp + c]);
             }
           }
       }

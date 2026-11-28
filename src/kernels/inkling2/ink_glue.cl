@@ -16,10 +16,16 @@
 #pragma OPENCL FP_CONTRACT OFF
 // The (row, stream) work-groups of the multi-stream mixes. A prompt chunk numbers the streams of one row next to
 // each other, so that row's depth states come from memory once and from the cache for its other streams.
+// The prompt pass's row kernels take the launch's first row (`row0`; the rows' stride stays the chunk's): under
+// `--parallel tp` each card runs the glue of its own rows of the chunk (card 1's from its first), one card from 0.
 #if INK_PREFILL
-#define MIX_ROW get_group_id(1)
+#define PF_ROW0_ARG , uint row0
+#define PF_ROW0 row0
+#define MIX_ROW (get_group_id(1) + row0)
 #define MIX_STREAM get_group_id(0)
 #else
+#define PF_ROW0_ARG
+#define PF_ROW0 0u
 #define MIX_ROW get_group_id(0)
 #define MIX_STREAM get_group_id(1)
 #endif
@@ -180,7 +186,7 @@ GLUE_SG
 __kernel void ink_depth_mix_norm(__global const float* states, __global const float* query,
                                  __global ushort* output, uint count, uint rows, float eps,
                                  __global const float* gamma0, __global const float* gamma1,
-                                 __global const float* gamma2, __global const float* last) {
+                                 __global const float* gamma2, __global const float* last PF_ROW0_ARG) {
   const uint r = MIX_ROW, q = MIX_STREAM, lane = get_local_id(0);
   __local float dots[SCALE_ROWS * WG], squares[SCALE_ROWS * WG], scale[BANK], score[BANK], mixed[H];
   ink_depth_scales(states, last, query, count, rows, r, q, lane, 1e-6f, dots, squares, scale, score);
@@ -244,8 +250,8 @@ __kernel void ink_controller_blend(__global const float* input, __global const f
 // rows. Weights are chronological [channel][4], the newest tap last.
 __kernel void ink_post_conv(__global const float* input, __global const float* history,
                             __global const float* taps, __global const float* residual,
-                            __global float* out, __global ushort* draft_tap) {
-  const uint i = get_global_id(0), r = get_global_id(1);
+                            __global float* out, __global ushort* draft_tap PF_ROW0_ARG) {
+  const uint i = get_global_id(0), r = get_global_id(1) + PF_ROW0;
   float sum = 0.f;
   for (uint tap = 0; tap < 4; ++tap) {
     const int t = (int)r + (int)tap - 3;
@@ -341,8 +347,8 @@ __kernel void ink_pack(__global const float* x, __global ushort* a) {
   a[i] = rne_bf16(x[i]);
 }
 
-__kernel void ink_tap(__global const float* x, __global const ushort* a, __global ushort* tap, uint slot) {
-  const uint i = get_global_id(0), row = get_global_id(1);
+__kernel void ink_tap(__global const float* x, __global const ushort* a, __global ushort* tap, uint slot PF_ROW0_ARG) {
+  const uint i = get_global_id(0), row = get_global_id(1) + PF_ROW0;
   const size_t at = (size_t)row * H + i;
   tap[((size_t)row * 4 + slot) * H + i] = x ? rne_bf16(x[at]) : a[at];
 }
@@ -392,8 +398,8 @@ __kernel void ink_post_mix_norm(__global const float* bank, __global float* last
                                  __global const float* query, __global ushort* out,
                                  __global const float* gamma, uint states, uint rows, float eps,
                                  __global const float* raw, __global const float* history,
-                                 __global const float* taps, __global const float* residual) {
-  const uint r = get_group_id(0), lane = get_local_id(0);
+                                 __global const float* taps, __global const float* residual PF_ROW0_ARG) {
+  const uint r = get_group_id(0) + PF_ROW0, lane = get_local_id(0);
   __local float dots[SCALE_ROWS * WG], squares[SCALE_ROWS * WG], scale[BANK], score[BANK], temp[H];
 #if INK_PREFILL
   ink_attention_residual(last, raw, history, taps, residual, r, lane);
@@ -434,7 +440,7 @@ __kernel void ink_mix_cat(__global const float* bank, __global float* last,
                           __global GLUE_T* mixed, __global ushort* cat,
                           uint states, uint rows, uint shared_mix, float eps,
                           __global const float* raw, __global const float* history,
-                          __global const float* taps, __global const float* residual) {
+                          __global const float* taps, __global const float* residual PF_ROW0_ARG) {
   const uint r = MIX_ROW, stream = MIX_STREAM, lane = get_local_id(0);
   const size_t start = ((size_t)stream * rows + r) * H;
   __local float dots[SCALE_ROWS * WG], squares[SCALE_ROWS * WG], scale[BANK], score[BANK], temp[H];
@@ -502,8 +508,8 @@ __kernel void ink_prefill_controller(__global const ushort* rank, __global GLUE_
                                      __global const ushort* f2, __global const ushort* g0,
                                      __global const ushort* g1, __global const ushort* g2,
                                      __global const float* q_norm, __global const float* k_norm,
-                                     __global const float* v_norm, uint rows, float eps) {
-  const uint r0 = get_group_id(0) * 8, stream = get_group_id(1);
+                                     __global const float* v_norm, uint rows, float eps, uint row0) {
+  const uint r0 = row0 + get_group_id(0) * 8, stream = get_group_id(1);
   const uint sg = get_sub_group_id(), l = get_sub_group_local_id(), lane = get_local_id(0);
   __global const ushort* fw = stream == 0 ? f0 : stream == 1 ? f1 : f2;
   __global const ushort* gw = stream == 0 ? g0 : stream == 1 ? g1 : g2;
@@ -654,8 +660,9 @@ inline float ink_pf_value(__global const float* states, __global const float* la
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void ink_prefill_mix_cat(__global const float* bank, __global const float* last,
                                   __global const float* query, __global const GLUE_T* messages,
-                                  __global GLUE_T* mixed, __global ushort* cat, uint count, uint rows, float eps) {
-  const uint r = get_group_id(0), lane = get_local_id(0);
+                                  __global GLUE_T* mixed, __global ushort* cat, uint count, uint rows, float eps,
+                                  uint row0) {
+  const uint r = row0 + get_group_id(0), lane = get_local_id(0);
   __local float scratch[BANK * 2 * WG], temp[H];
   __global const float* q[QMAX] = {query};
   float scale[QMAX][BANK];
@@ -691,8 +698,8 @@ __kernel void ink_prefill_mix_cat(__global const float* bank, __global const flo
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void ink_prefill_cross_mix(__global const float* states, __global const float* qs,
                                     __global const float* kv, __global GLUE_T* out, uint rows,
-                                    __global const float* last, uint layer) {
-  const uint r = get_group_id(0), lane = get_local_id(0);
+                                    __global const float* last, uint layer, uint row0) {
+  const uint r = row0 + get_group_id(0), lane = get_local_id(0);
   __local float scratch[2 * 5 * WG];
   __global const float* q[QMAX] = {qs + (size_t)(2 * layer) * H, kv + (size_t)(2 * layer) * H,
                                    kv + (size_t)(2 * layer + 1) * H, qs + (size_t)(2 * layer + 1) * H};

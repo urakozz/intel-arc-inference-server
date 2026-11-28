@@ -9,7 +9,7 @@ if(NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
   endif()
   set(CMAKE_CXX_COMPILER ${B70_GXX})
 endif()
-project(b70_inference_server VERSION 1.2.0 LANGUAGES CXX)
+project(b70_inference_server VERSION 1.2.1 LANGUAGES CXX)
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
   message(FATAL_ERROR "${CMAKE_CXX_COMPILER} is ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}: this build "
                       "needs GCC 16 (C++26 with -freflection), e.g. ${B70_GXX}")

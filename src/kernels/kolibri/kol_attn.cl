@@ -78,6 +78,20 @@
 #error "kol_attn: the ring is whole 64-key blocks holding the window, and the window's blocks fit TGT"
 #endif
 #define GQA (Q_HEADS / KV_HEADS)
+// ATTN_RSPLIT (Inkling tp's verify rows): a (kv head, block)'s rows over ATTN_RSPLIT work-groups - grid z, RROWS rows
+// each - so a launch of half the heads keeps one card's work-group count, each walking half the pairs. A pair's
+// waves, sums and stores are the unsplit form's in the same order: bitwise.
+#ifndef ATTN_RSPLIT
+#define ATTN_RSPLIT 1
+#endif
+#if ATTN_RSPLIT > 1
+#define RROWS ((M + ATTN_RSPLIT - 1) / ATTN_RSPLIT)
+#define LPR (RROWS * GQA)
+#define PAIR_M(pr) (m0 + (pr) / GQA)
+#else
+#define LPR NPR
+#define PAIR_M(pr) ((pr) / GQA)
+#endif
 #define HD 128
 #define OUT_N (Q_HEADS * HD)
 #define WAVE_P 16
@@ -242,30 +256,36 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
   const bool live1 = msplit < n_act && blk * s1 < pos + n_act;
 #endif
   if (!live0 && !live1) return;
+#if ATTN_RSPLIT > 1
+  const uint m0 = get_group_id(2) * RROWS;
+#endif
 
-  __local float qpack[NPR * HD];              // [m][qhl][128]
-  __local float sc_x[2][NPR][WAVE_P];         // the wave's raw dots, double buffered
-  for (uint i = lid; i < NPR * HD; i += WG) {
+  __local float qpack[LPR * HD];              // [m][qhl][128]
+  __local float sc_x[2][LPR][WAVE_P];         // the wave's raw dots, double buffered
+  for (uint i = lid; i < LPR * HD; i += WG) {
     const uint pr = i / HD, d = i % HD;
-    const uint m = pr / GQA, qhl = pr % GQA;
+    const uint m = PAIR_M(pr), qhl = pr % GQA;
     qpack[i] = m < n_act ? attn_q[((size_t)m * Q_HEADS + j * GQA + qhl) * HD + d] : 0.0f;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
 #if ATTN_SPLIT
-  __local float smx[NPR], ssm[NPR], srs[NPR], swl[NPR][WAVE_P];   // each pair's running max and sum, its wave's weights
-  float acc[NPR];
-  for (uint q = 0; q < NPR; ++q) acc[q] = 0.0f;
-  if (lid < NPR) { smx[lid] = -INFINITY; ssm[lid] = 0.0f; }
+  __local float smx[LPR], ssm[LPR], srs[LPR], swl[LPR][WAVE_P];   // each pair's running max and sum, its wave's weights
+  float acc[LPR];
+  for (uint q = 0; q < LPR; ++q) acc[q] = 0.0f;
+  if (lid < LPR) { smx[lid] = -INFINITY; ssm[lid] = 0.0f; }
 #else
-  float mx[NPR], sm[NPR], acc[NPR];
-  for (uint q = 0; q < NPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
+  float mx[LPR], sm[LPR], acc[LPR];
+  for (uint q = 0; q < LPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
 #endif
   uint wc = 0;
 
   for (uint g = 0; g < 2; ++g) {
     const uint mlo = g ? msplit : 0u, mhi = g ? n_act : msplit;
     if (mlo >= mhi) continue;
+#if ATTN_RSPLIT > 1
+    if (max(mlo, m0) >= min(mhi, m0 + RROWS)) continue;   // none of this work-group's rows: uniform
+#endif
     const uint s = g ? s1 : s0;
     const uint end = pos + mhi;
     const uint bstart = base + blk * s;
@@ -286,8 +306,8 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       const uint p0 = bstart + w * WAVE_P;
       const uint buf = wc & 1u;
 #pragma unroll
-      for (uint pr = 0; pr < NPR; ++pr) {
-        const uint m = pr / GQA;
+      for (uint pr = 0; pr < LPR; ++pr) {
+        const uint m = PAIR_M(pr);
         if (m < mlo || m >= mhi) continue;    // uniform
         const uint8 qa = intel_sub_group_block_read8((__local const uint*)&qpack[pr * HD]);
         float qv[PER_LANE];
@@ -304,8 +324,8 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       }
       barrier(CLK_LOCAL_MEM_FENCE);
 #if ATTN_SPLIT
-      for (uint pr = sgid; pr < NPR; pr += NSG) {   // the pair's owner sub-group
-        const uint m = pr / GQA;
+      for (uint pr = sgid; pr < LPR; pr += NSG) {   // the pair's owner sub-group
+        const uint m = PAIR_M(pr);
         if (m < mlo || m >= mhi) continue;    // uniform
         const float mxp = smx[pr];
         const uint bound = pos + m, lo = key_lo(bound);
@@ -348,8 +368,8 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       }
       barrier(CLK_LOCAL_MEM_FENCE);
 #pragma unroll
-      for (uint pr = 0; pr < NPR; ++pr) {
-        const uint m = pr / GQA;
+      for (uint pr = 0; pr < LPR; ++pr) {
+        const uint m = PAIR_M(pr);
         if (m < mlo || m >= mhi) continue;    // uniform
         float tsum = 0.0f;
         for (uint s2 = 0; s2 < WAVE_P; ++s2) tsum = fma(swl[pr][s2], KVAL(vreg[s2]), tsum);   // ascending s
@@ -357,8 +377,8 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       }
 #else
 #pragma unroll
-      for (uint pr = 0; pr < NPR; ++pr) {
-        const uint m = pr / GQA;
+      for (uint pr = 0; pr < LPR; ++pr) {
+        const uint m = PAIR_M(pr);
         if (m < mlo || m >= mhi) continue;    // uniform
         const uint bound = pos + m, lo = key_lo(bound);
         const uint p = p0 + lane;
@@ -409,8 +429,8 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       }
     }
 #pragma unroll
-    for (uint pr = 0; pr < NPR; ++pr) {
-      const uint m = pr / GQA, qhl = pr % GQA;
+    for (uint pr = 0; pr < LPR; ++pr) {
+      const uint m = PAIR_M(pr), qhl = pr % GQA;
       if (m < mlo || m >= mhi) continue;
       __global float* restrict out = attn_part + (((size_t)(j * GQA + qhl) * TGT + blk) * M + m) * PART;
       out[2 + lid] = acc[pr];

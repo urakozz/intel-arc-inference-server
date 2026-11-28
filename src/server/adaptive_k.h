@@ -2,9 +2,11 @@
 // Spec 8 §10: `b70-serve --spec mtp` - per request, choose the iteration's draft count K
 // from the request's own acceptance so far. Pure host code, unit-tested by
 // tests/server/adaptive_k_test.cc; the server keeps one AdaptiveK per request.
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <inplace_vector>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,11 +73,11 @@ struct MtpCost {
   // steps (15.09 ms), the drafter's pass 4.21 ms = 0.279, flat in K (one pass drafts all 7 rows).
   static MtpCost inkling_dspark();
   // Plan 41k: with the DFlash 2 drafter (runtime::inkling2::kOneCardDflashCost, depth 4096): a verify of 2..8
-  // rows 1.167 .. 2.175 plain steps (12.7 ms), the drafter's pass 2.94 ms = 0.232 (int8 linears, the 2-bit
-  // candidate head), flat in K.
+  // rows 1.170 .. 1.960 plain steps (11.7 ms), the drafter's pass 1.70 ms = 0.145 (the packed int4 drafter, the 2-bit
+  // candidate head), flat in K. b70-serve's prior only: it serves on its own measured costs (LiveCost).
   static MtpCost inkling_dflash2();
-  // ... under `--parallel tp`, the drafter's head rows split over the cards (runtime::inkling2::kTpDflashCost): 1.134 ..
-  // 2.027, the drafter's pass 0.290 (3.13 ms against tp's 10.8 ms plain step).
+  // ... under `--parallel tp`, the drafter's head rows split over the cards (runtime::inkling2::kTpDflashCost): 1.097 ..
+  // 1.778, the drafter's pass 0.213 (2.13 ms against tp's 10.0 ms plain step).
   static MtpCost inkling_dflash2_tp();
   // Plan 41j: the same under `--parallel tp` (both cards, depth 4096, 2026-11-26, the drafter's layers split): 1.102 ..
   // 1.835 plain steps for 2..8 rows, the drafter's pass 0.310 (served tp's table by depth: kTpCosts).
@@ -137,6 +139,42 @@ struct AdaptiveKOptions {
   // position): (depth, table) ascending; next(pos) uses the table interpolated at pos (the ends held) in place of cost.
   // Each table has cost's rows.
   std::vector<std::pair<uint32_t, MtpCost>> by_depth;
+  // The costs the server measures as it serves (LiveCost::at), in place of cost and by_depth when set.
+  std::function<MtpCost(uint32_t pos)> live;
+};
+
+// A speculative round's costs as the server measures them (Inkling 2 Mini): the wall time of each verify width (1..8
+// rows, 1 the plain step) and of the draft pass at each K, a running average over the last ~kWindow rounds at depths
+// 4096 x 2^i (4,096 .. 1,048,576; a round counts at the nearest), in plain steps of the same depth, interpolated
+// between the depths at a round's position. `prior` (a (depth, table) list ascending, plain-step units, the rows
+// MtpCost::kMaxRows) stands in for what no round has timed yet - a width, a K's draft or a depth - and for the plain
+// step's own time at a depth only drafted rounds reached (there: each timed width's time over its prior ratio,
+// averaged). seed() enters a load-time measurement at its depth and scales the prior by its ratios to it. A time over
+// 4x its width's average (a stall) is not counted. Locked: replica's two cards report into one.
+class LiveCost {
+ public:
+  static constexpr uint32_t kRows = MtpCost::kMaxRows, kFirstDepth = 4096, kDepths = 9, kWindow = 32;
+  explicit LiveCost(std::vector<std::pair<uint32_t, MtpCost>> prior);
+  // verify_ms[m - 1]: an m-row verify; draft_ms: the draft pass at K kRows - 1.
+  void seed(uint32_t pos, const std::array<double, kRows>& verify_ms, double draft_ms);
+  void verify(uint32_t pos, uint32_t rows, double ms);
+  void draft(uint32_t pos, uint32_t k, double ms);
+  MtpCost at(uint32_t pos) const;
+
+ private:
+  struct Mean {
+    double ms = 0;
+    uint32_t n = 0;
+    void add(double x);
+  };
+  struct Depth {
+    std::array<Mean, kRows> verify;
+    std::array<Mean, kRows - 1> draft;
+  };
+  MtpCost cost(uint32_t d) const;   // depth d's, under the lock
+  std::vector<std::pair<uint32_t, MtpCost>> prior_;
+  std::array<Depth, kDepths> d_{};
+  mutable std::mutex mu_;
 };
 
 class AdaptiveK {

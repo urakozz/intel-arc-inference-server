@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <optional>
 #include <print>
 #include <unistd.h>
 
@@ -512,6 +513,17 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
       options.mtp_adaptive.by_depth.emplace_back(d.depth, c);
     }
   };
+  // The round's costs are the server's own: measured at load from the table (the prior for what is not timed yet),
+  // then each round timed as it serves (server::LiveCost); the adaptive K and the DFlash 2 stop read them.
+  const auto measure_round_costs = [&](std::optional<server::LiveCost>& live, auto& adapter) {
+    live.emplace(options.mtp_adaptive.by_depth);
+    adapter.set_live_costs(&*live);
+    const auto [ms, draft_ms] = adapter.measure_costs(*live);
+    std::print(stderr, "spec: round costs measured at load (4096 positions): the plain step {:.2f} ms, a verify of 2 / 8 "
+               "rows {:.3f} / {:.3f} plain steps, the draft pass {:.3f}; kept current from every round served\n",
+               ms[0], ms[1] / ms[0], ms[7] / ms[0], draft_ms / ms[0]);
+    options.mtp_adaptive.live = [&l = *live](uint32_t pos) { return l.at(pos); };
+  };
   if (draft) {   // the server's adaptive K over Inkling's measured verify rows and draft pass
     set_depth_costs(checkpoint.dflash() ? std::span<const ri::DepthCost>(ri::kOneCardDflashCosts) : ri::kOneCardCosts);
     options.mtp_auto = true;
@@ -584,7 +596,8 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
     TemplateAdapter chat_template(snapshot_dir);
     ci::Inkling2EngineAdapterT<E> adapter(engine, D::vocab_used, pp_chunk, draft ? spec_max : 0,
                                           options.spec_dflash_lookup);
-    if (draft && checkpoint.dflash()) adapter.set_verify_costs(options.mtp_adaptive.by_depth);
+    std::optional<server::LiveCost> live;
+    if (draft) measure_round_costs(live, adapter);
     const std::unique_ptr<PinnedAlloc> prefix_alloc =
         make_prefix_alloc(d0, prefix_auto, prefix_gb, options, /*two_cards=*/true);
     g_in_place.spec = draft ? "auto" : "off";
@@ -650,8 +663,11 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
   for (auto& e : engines)
     adapters.push_back(std::make_unique<Adapter>(*e, D::vocab_used, chunk, draft ? spec_max : 0,
                                                  options.spec_dflash_lookup));
-  if (draft && checkpoint.dflash())
-    for (auto& a : adapters) a->set_verify_costs(options.mtp_adaptive.by_depth);
+  std::optional<server::LiveCost> live;   // replica: both cards time their rounds into it
+  if (draft) {
+    measure_round_costs(live, *adapters[0]);
+    for (auto& a : adapters) a->set_live_costs(&*live);
+  }
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, prefix_auto, prefix_gb, options, replica);
   g_in_place.spec = draft ? "auto" : "off";
   g_in_place.spec_auto = true;

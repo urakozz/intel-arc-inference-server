@@ -169,6 +169,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {3072, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj: 36 column groups took 62 us at 2 rows
     {2304, 200064, 1, 3, false, true, false, false, kSmVerify8},   // PERF-123: the head's 2-bit candidate pass
                                                                    // (magic: plan 41k's 1 + c / 4 dequant)
+    {2304, 100032, 1, 3, false, true, false, false, kSmDraft7},    // its half rows on a `--parallel tp` card (draft)
     {2304, 512, 1, 2, false, false, false, false, kSmVerify8},     // and the exact rescore (the full head's knobs)
     {1536, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj on a `--parallel tp` card (its 12 heads)
     // Plan 41k L1: Inkling's DFlash 2 drafter's int8 linears - the block's q||k||v, o, gate||up, down, the conv

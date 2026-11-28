@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <utility>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -207,16 +208,28 @@ class Engine {
     PrefillBuffers* s;
     size_t visit = 0;
     uint32_t phase = 0;   // the visit's next part: 0 its attention, 1 its experts, 2 the rest of the visit
+    bool gathered = false;   // tp, a split chunk: the part's glue ran and its rows crossed (the part's linears next)
     void *current = nullptr, *next = nullptr, *midpoint = nullptr, *prev_midpoint = nullptr;
     uint32_t finished = 0;
     const void* quantized = nullptr;
     bool done = false;
   };
+  // tp: an all-reduce (`part` set) or, on a chunk whose glue rows the cards split (tp_split_rows), the gather of the
+  // glue's output: this card's rows of each range written into the other card's same place.
   struct Crossing {
-    const void* part;   // this card's rows (fp32 [rows][hidden])
-    void* sum;          // where both cards' rows go, card 0's first
-    uint32_t rows;
+    const void* part = nullptr;   // this card's rows (fp32 [rows][hidden])
+    void* sum = nullptr;          // where both cards' rows go, card 0's first
+    uint32_t rows = 0;
+    // A split chunk's all-reduce: card 0 sums the rows [0, half) and the last three (the commit's histories), card 1
+    // the rows from half - 3 (its first rows' convolutions read the three before). 0: every row on both.
+    uint32_t half = 0;
+    int32_t mlp_visit = -1;   // the experts' all-reduce of this walk visit
+    std::array<std::pair<const void*, size_t>, 4> gather{};   // (this card's rows, bytes)
+    uint32_t ranges = 0;
   };
+  // tp: the first row of a prompt chunk's glue that card 1 runs (card 0 the rows before it), 0 when the chunk is
+  // too short to split: whole 8-row groups (ink_prefill_controller's), at least 64 rows.
+  static uint32_t tp_split_rows(uint32_t rows) { return rows >= 64 ? rows / 2 / 8 * 8 : 0; }
   PrefillWalk prefill_walk(const PrefillChunk& chunk, const uint32_t* ids, bool head, PrefillBuffers& s);
   // The walk up to its next all-reduce (returned; the next part starts after its sum is in place) or to its end.
   std::optional<Crossing> record_prefill_part(l0::CmdList& list, PrefillWalk& walk);

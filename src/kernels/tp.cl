@@ -20,6 +20,13 @@
 //   FOLDED 1 (folded)  one fp32 row [M][K]: the card's S_LOC slices summed in slice order (kept in `own` too); the fold
 //                      adds card 0's row then card 1's - bitwise between the cards, another order than one card's.
 //
+//   TP_WIRE_BF16  the slices form's wire carries the rows as bf16 pairs packed two a 32-bit word: half the bytes, the
+//                 landing's layout unchanged (a slot's data area keeps its fp32 word capacity, only its low half used,
+//                 so the trailers and flags sit at the same offsets as the fp32 wire's and a list may mix both forms).
+//                 Both parts are rounded to bf16 - the sender's on the wire, the receiver's own in the fold - so both
+//                 cards sum the same two bf16 values in the same order (card 0's part first) and hold the same bits;
+//                 against the fp32 wire the sums are not bitwise - judged, not bitwise.
+//
 // The protocol (runtime/tp_protocol.h is the host mirror, line for line; tests/runtime/tp_protocol_test.cc runs it on
 // threads). Spec 17a's route (P), the only one that works on this machine: every
 // crossing lands in the READER's own VRAM, written by the peer with plain stores, published by a plain flag store
@@ -63,8 +70,16 @@
 #ifndef TP_MROWS
 #define TP_MROWS 8
 #endif
+#ifndef TP_WIRE_BF16
+#define TP_WIRE_BF16 0
+#endif
 #if M > TP_MROWS || RANK > 1
 #error "tp.cl: M <= TP_MROWS, RANK 0 or 1"
+#endif
+#if TP_WIRE_BF16
+#if FOLDED || (defined(TP_WIRE_COLS) && TP_WIRE_COLS) || K % (2 * FOLD_G) != 0
+#error "tp.cl TP_WIRE_BF16: the slices form, whole bf16 pairs under every chunk (K a multiple of 2 x FOLD_G)"
+#endif
 #endif
 #if FOLDED
 #define S_MSG 1
@@ -111,14 +126,25 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
   const uint k0 = g * CHUNK;
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;
+#if TP_WIRE_BF16
+  for (uint k = k0 + 2 * lid; k + 1 < k1; k += 2 * WG) {   // one lane a packed bf16 pair
+#else
   for (uint k = k0 + lid; k < k1; k += WG) {
+#endif
 #if FOLDED
     float acc = 0.f;
     for (uint s = 0; s < S_LOC; ++s) acc += partials[((size_t)s * M + m) * K + k];
     own[(size_t)m * K + k] = acc;
     d[(size_t)m * K + k] = as_uint(acc);
 #else
-    for (uint s = 0; s < S_LOC; ++s) d[((size_t)s * M + m) * K + k] = as_uint(partials[((size_t)s * M + m) * K + k]);
+    for (uint s = 0; s < S_LOC; ++s) {
+#if TP_WIRE_BF16
+      const size_t e = ((size_t)s * M + m) * K + k;
+      d[e >> 1] = (uint)rne_bf16(partials[e + 1]) << 16 | rne_bf16(partials[e]);
+#else
+      d[((size_t)s * M + m) * K + k] = as_uint(partials[((size_t)s * M + m) * K + k]);
+#endif
+    }
 #endif
   }
   if (lid < TP_TRAILER_STRIDE) land[TRAILER(slot, j) + lid] = n;   // the stamp as a whole line, like the data's
@@ -133,11 +159,25 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
 
 // One part's contribution to the fold's chain: S slices of [S][M][K], from this card's memory or (remote) the landing
 // (REMOTE_SRC(s): the data slot slice s came in - under TP_WIRE_COLS its sender chunk's, else the one chunk's `src`).
+#if TP_WIRE_BF16
+#define LOCAL_PART(acc)                                                                   \
+  for (uint s = 0; s < S_MSG; ++s) acc += bf16f(rne_bf16(mine[((size_t)s * M + m) * K + k]));
+#else
 #define LOCAL_PART(acc)                                                                   \
   for (uint s = 0; s < S_MSG; ++s) acc += mine[((size_t)s * M + m) * K + k];
+#endif
+#if TP_WIRE_BF16
+#define REMOTE_PART(acc)                                                                  \
+  for (uint s = 0; s < S_MSG; ++s) {                                                      \
+    const uint w = SYS_LOAD(REMOTE_SRC(s) + ((((size_t)s * M + m) * K + k) >> 1),         \
+                            memory_order_relaxed);                                        \
+    acc += bf16f((ushort)((k & 1u) ? (w >> 16) : (w & 0xFFFFu)));                         \
+  }
+#else
 #define REMOTE_PART(acc)                                                                  \
   for (uint s = 0; s < S_MSG; ++s)                                                        \
     acc += as_float(SYS_LOAD(REMOTE_SRC(s) + ((size_t)s * M + m) * K + k, memory_order_relaxed));
+#endif
 #ifdef TP_WIRE_COLS
 #define REMOTE_SRC(s) (land + (s_want[(s) * WIRE_PER_G + (k - k0) / TP_WIRE_COLS] & 1u) * DATA_WORDS)
 #else

@@ -292,7 +292,7 @@ int main() {
     l0::Mem contrib(ctx, l0::MemKind::Device, M * top * H * sizeof(float));
     run("kol_moe_union_down", 64, H / 64, top * M, {plan.ptr(), uh.ptr(), down.ptr(), contrib.ptr()});
     list.copy(rs.ptr(), residual.data(), rs.size());
-    run("kol_moe_union_finish", 128, H / 128, 1, {er.ptr(), contrib.ptr(), hh.ptr(), et.ptr(), raw.ptr(), rs.ptr(), tap_dev.ptr()});
+    run("kol_moe_union_finish", 128, H / 128, M, {er.ptr(), contrib.ptr(), hh.ptr(), et.ptr(), raw.ptr(), rs.ptr(), tap_dev.ptr()});
 
     std::vector<uint16_t> union_h(expert_h.size());
     list.copy(expert_h.data(), eh.ptr(), eh.size());
@@ -413,6 +413,25 @@ int main() {
     run(fused_route, "kol_route_logits", 16 * ink::kRouteSplit, 8, rows, 1, rw_dev.ptr(), rx_dev.ptr(), logits.ptr());
     run(plain_route, "kol_route", 128, 1, rows, 1, logits.ptr(), rb_dev.ptr(), split_route.ptr());
     same(read(fused, uint32_t{}), read(split_route, uint32_t{}));
+    // The candidate-ranked selection (PERF-28) against kol_route on random rows, rows of tied values, and a row with
+    // exactly 8 candidates (each sub-group's largest above every other expert: `next` from the rest).
+    {
+      constexpr uint32_t R = 8;
+      std::vector<float> lg(R * 128);
+      for (auto& v : lg) v = next(3.f);
+      for (uint32_t e = 0; e < 128; ++e) lg[2 * 128 + e] = float(int(e * 7 % 5)) * .5f;   // five values, many ties
+      for (uint32_t e = 0; e < 128; ++e) lg[3 * 128 + e] = e % 3 ? 1.f : 2.f;
+      for (uint32_t e = 0; e < 128; ++e) lg[4 * 128 + e] = e % 16 == 5 ? 6.f + e / 16 : next(1.f);
+      std::fill_n(lg.begin() + 5 * 128, 128, -1.f);                                          // all tied
+      auto lg_dev = upload(lg);
+      l0::Mem plain(ctx, l0::MemKind::Device, R * 32 * 4), cand(ctx, l0::MemKind::Device, R * 32 * 4);
+      list.fill(plain.ptr(), 0xff, plain.size());
+      list.fill(cand.ptr(), 0xff, cand.size());
+      l0::Module cand_route(ctx, kernels::path(ink::route_select()));
+      run(plain_route, "kol_route", 128, 1, R, 1, lg_dev.ptr(), rb_dev.ptr(), plain.ptr());
+      run(cand_route, "kol_route", 128, 1, R, 1, lg_dev.ptr(), rb_dev.ptr(), cand.ptr());
+      same(read(plain, uint32_t{}), read(cand, uint32_t{}));
+    }
     // The controllers' GEMVs on the DPAS: each row of the 8-row build is the one-row build's bits (down: the cat rows
     // into the rank, bf16 out; up: the rank into the forget and gain rows, fp32 out).
     {
@@ -446,5 +465,5 @@ int main() {
     }
   }
 
-  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits. Split mixes and norms match the one-work-group kernels' bits. The controllers' verify rows match the one-row GEMVs' bits.");
+  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits. Split mixes and norms match the one-work-group kernels' bits. The candidate-ranked routing matches kol_route's bits. The controllers' verify rows match the one-row GEMVs' bits.");
 }

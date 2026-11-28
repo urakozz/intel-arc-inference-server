@@ -3075,7 +3075,7 @@ foreach(window "W1024_R4096;1024;4096" "F;0;0")
   add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_${tag}_PAIR
                    SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
                    DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=${w} RING=${ring}
-                           INK_PREFILL=1 PAIR=1
+                           INK_PREFILL=1 PAIR=1 PAIR_K2D=1 PAIR_V2D=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
 endforeach()
 add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
@@ -3090,7 +3090,7 @@ add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_I8S_PAIR
                  OPTIONS -cl-intel-256-GRF-per-thread)
 # PERF-12 (plan 41h): the split-K form of the three full-visit PAIR builds above, for a short chunk deep in the cache
 # (runtime::inkling2::attention_spans), with its merge kernel.
-foreach(v "F_PAIR|PAIR=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1" "F_KV8_I8S_PAIR|KV8=1;PAIR=1;KV8_SHARE=1;KV8_I8S=1")
+foreach(v "F_PAIR|PAIR=1;PAIR_K2D=1;PAIR_V2D=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1" "F_KV8_I8S_PAIR|KV8=1;PAIR=1;KV8_SHARE=1;KV8_I8S=1")
   string(REPLACE "|" ";" v "${v}")
   list(GET v 0 tag)
   list(REMOVE_AT v 0)
@@ -3100,7 +3100,7 @@ foreach(v "F_PAIR|PAIR=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1" "F_KV8_I8S_PAIR|
                    OPTIONS -cl-intel-256-GRF-per-thread)
 endforeach()
 # Plan 41h Task 2: the bf16 and int8-cache split forms as the verify lists' full-visit attention at depth.
-foreach(v "F_PAIR|PAIR=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1")
+foreach(v "F_PAIR|PAIR=1;PAIR_K2D=1;PAIR_V2D=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1")
   string(REPLACE "|" ";" v "${v}")
   list(GET v 0 tag)
   list(REMOVE_AT v 0)
@@ -3202,6 +3202,9 @@ foreach(M RANGE 1 8)
   if(NOT M EQUAL 1)   # the tap projections' verify rows (kernels::inkling2::kTapColumns)
     add_gemv_i8w_variant(${M} 2304 64 GEMV_AHEAD=3 GEMV_KSPLIT=16)   # kernels::inkling2::kTapKSplit
     list(APPEND INKLING_KERNELS gemv_i8w_M${M}_K2304_N64)
+  else()   # and the one row's: the same K split (PERF-38; one work-group walking K took 16 us)
+    add_ocloc_kernel(gemv_i8w_M1_K2304_N64_KS SOURCE ${GEMV_I8W_CL} DEFINES M=1 K=2304 N=64 GEMV_AHEAD=3 GEMV_KSPLIT=16)
+    list(APPEND INKLING_KERNELS gemv_i8w_M1_K2304_N64_KS)
   endif()
   # PERF-123: the greedy head - the 2-bit candidate pass and the rescore at 512 columns with the full head's kernel.
   # The candidate pass on plan 41k's magic dequant (MG; probe_df2_linears, us: 1 row 297 -> 248, 7 rows 308 -> 269).
@@ -3235,7 +3238,7 @@ foreach(M RANGE 1 8)
   set(ink_union)
   set(ink_attn_split)
   if(M GREATER 1)
-    set(ink_union MOE_UNION=1)
+    set(ink_union MOE_UNION=1 INK_MOE_FINISH_RSPLIT=1)   # the finish a work-group a row (PERF-38, bitwise)
     set(ink_attn_split ATTN_SPLIT=1)
   endif()
   foreach(row "NVFP4;1" "MXFP8;2")
@@ -3275,6 +3278,11 @@ endforeach()
 add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
                  DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128 ROUTE_RENORM=1 ROUTE_SCALE=8.0f)
 list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM)
+# PERF-28: only the candidates ranked (ROUTE_CAND), bitwise kol_route_E128_T8_N128_L128_RENORM.
+add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM_CAND SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                 DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128 ROUTE_RENORM=1 ROUTE_SCALE=8.0f
+                         ROUTE_CAND=1)
+list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM_CAND)
 add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM_M1_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
                  DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128
                          ROUTE_RENORM=1 ROUTE_SCALE=8.0f INK_ROUTE_M1=1 ROUTE_KS=8)
@@ -3342,7 +3350,8 @@ list(APPEND INKLING_KERNELS ink_glue_H2304 ink_prep_Q24KV8_D128_REL16
 # Inkling 2 Mini under `--parallel tp` (plan 41j): a card's half of every visit's heads (12 q / 4 kv: the fused q / k
 # / v / gate / relative projection at its rows, o_proj at its K) and of every expert's width (576), then the all-reduce
 # after o_proj and after the experts' down projection (tp.cl, the slices form at one slice: tp_send, then tp_sum into
-# fp32). The I576 MoE builds are tp's alone, so their union finish stops at the card's part of the sum (INK_MOE_TP_SUM).
+# fp32; the verify rows M > 1 take the bf16 wire's _sum_BF16 variants). The I576 MoE builds are tp's alone, so their
+# union finish stops at the card's part of the sum (INK_MOE_TP_SUM).
 foreach(M RANGE 1 8)
   if(M EQUAL 1)
     set(name gemv_i8w_M1_K2304_N1536_QKV512_FULL)
@@ -3386,12 +3395,27 @@ foreach(M RANGE 1 8)
                     DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=12 KV_HEADS=4 WINDOW=${w} RING=${ring}
                     REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 ${kv8} ${ink_attn_split})
     list(APPEND INKLING_KERNELS ${name})
+    if(M GREATER 1)   # a (kv head, block)'s rows over two work-groups (kernels::inkling2::kTpAttnRowSplit)
+      add_ocloc_kernel(${name}_RS2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
+                      DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=12 KV_HEADS=4 WINDOW=${w} RING=${ring}
+                      REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 ${kv8} ${ink_attn_split} ATTN_RSPLIT=2)
+      list(APPEND INKLING_KERNELS ${name}_RS2)
+    endif()
   endforeach()
   foreach(R 0 1)
-    set(name tp_cross_M${M}_K2304_G9_S1_X_R${R}_sum)
-    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl
-                     DEFINES TP_CROSS=1 M=${M} K=2304 FOLD_G=9 S_LOC=1 FOLDED=0 RANK=${R} TP_SUM=1)
-    list(APPEND INKLING_KERNELS ${name})
+    if(M EQUAL 1)
+      set(name tp_cross_M${M}_K2304_G9_S1_X_R${R}_sum)
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl
+                       DEFINES TP_CROSS=1 M=${M} K=2304 FOLD_G=9 S_LOC=1 FOLDED=0 RANK=${R} TP_SUM=1)
+      list(APPEND INKLING_KERNELS ${name})
+    else()
+      # The verify rows' bf16 wire (tp.cl TP_WIRE_BF16): half the crossing's bytes, the landing's layout unchanged,
+      # the sums' order kept but not bitwise the fp32 wire. One row keeps the fp32 wire.
+      set(name tp_cross_M${M}_K2304_G9_S1_X_R${R}_sum_BF16)
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl
+                       DEFINES TP_CROSS=1 M=${M} K=2304 FOLD_G=9 S_LOC=1 FOLDED=0 RANK=${R} TP_SUM=1 TP_WIRE_BF16=1)
+      list(APPEND INKLING_KERNELS ${name})
+    endif()
   endforeach()
 endforeach()
 add_ocloc_kernel(ink_prep_Q12KV4_D128_REL16_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
@@ -3420,7 +3444,7 @@ foreach(window "W1024_R4096;1024;4096" "F;0;0")
   add_ocloc_kernel(kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_${tag}_PAIR
                    SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
                    DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=12 KV_HEADS=4 EXP2=0 EAGER=0 WINDOW=${w} RING=${ring}
-                           INK_PREFILL=1 PAIR=1
+                           INK_PREFILL=1 PAIR=1 PAIR_K2D=1 PAIR_V2D=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
 endforeach()
 add_ocloc_kernel(kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_KV8_PAIR SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
@@ -3548,10 +3572,14 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   i8_order_defs(200064 _ink_rr_km)
   add_ocloc_kernel(df_rerank_R7_K2304_U200058_C64_Q4 SOURCE ${DF_DIR}/df_rerank.cl
                    DEFINES K=2304 USED=200058 N=200064 ${_ink_rr_km})
-  # tp: df_topk over a card's 100032 of the head's rows (card 1's 100026 live), the lists merged on both cards
+  # tp: one card's form on a card's 100032 of the head's rows (card 1's 100026 live) - the 2-bit pass over the half,
+  # its 64 candidates a row, their exact rescore on the half's int8 tiles (ids the half's) - the lists merged on both
+  add_gemm_sm_variant(7 2304 100032 1 3 MG)
+  list(APPEND INKLING_SMALL_M kernel_gemm_sm_M7_K2304_N100032_S1_L3_mg)
   foreach(U 100032 100026)
-    add_ocloc_kernel(df_topk_R7_N100032_U${U} SOURCE ${DF_DIR}/df_topk.cl DEFINES R=7 N=100032 USED=${U} TOPK=16
-                     CH=4096 COMPACT=0)
+    add_ocloc_kernel(df_candidate_R7_N100032_U${U}_K64 SOURCE ${DF_DIR}/df_candidate.cl DEFINES R=7 N=100032 USED=${U})
+    add_ocloc_kernel(df_rerank_R7_K2304_U${U}_C64_Q4 SOURCE ${DF_DIR}/df_rerank.cl
+                     DEFINES K=2304 USED=${U} N=200064 ${_ink_rr_km})
   endforeach()
   # L1: the drafter's linears int8 (one scale a row) on gemm_sm_i8w's in-work-group K split (kSmallMTuning's plan 41k
   # rows, wg_ksl the last field): q||k||v, o, gate||up, down, the conv kernel projections and the selector's at the

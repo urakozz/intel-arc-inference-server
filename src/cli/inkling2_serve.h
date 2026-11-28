@@ -19,7 +19,9 @@
 //     drafts the window asked for, the round verifies the count with the most expected ids per cost: draft j's odds of
 //     being kept are its selector probability (softmax of its 16 scores at the walk's temperature, T 1 for greedy)
 //     calibrated at its position by the drafts verified so far (server::DraftCalib, one per engine), their running
-//     product the odds the first j are all kept, the cost the mode's own table at the position (set_verify_costs) - so
+//     product the odds the first j are all kept, the cost the round costs the server measures at the position
+//     (set_live_costs: each verify, draft pass and plain step timed into server::LiveCost, seeded at load by
+//     measure_costs) - so
 //     an unsure stretch costs fewer verify rows where rows are dear, and few are cut where they are cheap (drafted()
 //     says how many were verified).
 //     A sampled request's walk draws its drafts from that softmax (a fresh device key a round from the request's
@@ -31,6 +33,7 @@
 //     root (kInkling2StoreKey, the int8 cache another key) and the drafter; PERF-92's head image: the prompt's last
 //     logits row and its first id, so a whole repeated prompt is restored with nothing to prefill.
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -44,7 +47,9 @@
 #include <utility>
 #include <vector>
 
+#include "cli/bench_prompt.h"
 #include "runtime/dflash/dflash_control.h"   // DFlashDraftOut: a plain struct
+#include "server/adaptive_k.h"
 #include "server/deps.h"
 #include "server/dflash2_calib_seed.h"
 #include "server/spec_accept.h"
@@ -73,9 +78,44 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     if (k_ > 0 && !eng.drafter()) throw std::runtime_error("Inkling's drafter is not loaded (mtp.safetensors)");
   }
 
-  // The DFlash 2 round's verify costs by depth (b70-serve's AdaptiveKOptions::by_depth, the mode's table); none: every
-  // draft the window asked for is verified.
-  void set_verify_costs(std::vector<std::pair<uint32_t, server::MtpCost>> by_depth) { costs_ = std::move(by_depth); }
+  // The round costs this adapter times its calls into and the DFlash 2 round's stop reads; none: nothing is timed and
+  // every draft the window asked for is verified.
+  void set_live_costs(server::LiveCost* live) { live_ = live; }
+
+  // The round's costs measured before the server takes requests: a 4,096-id prompt (the bench prompt cycled), each
+  // verify width 1..8 with its commit (a round's verify and its deferred commit; the greedy plain step's append is
+  // both in one submission) and the draft pass (K 7) timed kTimed times after one untimed, into `live` (LiveCost::seed), the
+  // engine reset after. Returns the mean times in ms: the widths', then the draft pass's.
+  std::pair<std::array<double, kMaxK + 1>, double> measure_costs(server::LiveCost& live) {
+    constexpr uint32_t kDepth = server::LiveCost::kFirstDepth, kTimed = 8;
+    std::vector<uint32_t> ids(kDepth);
+    for (uint32_t i = 0; i < kDepth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
+    reset();
+    prefill(ids);
+    std::array<double, kMaxK + 1> ms{};
+    double draft_ms = 0;
+    const auto since = [](auto t) {
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+    };
+    for (uint32_t rows = 1; rows <= kMaxK + 1; ++rows)
+      for (uint32_t i = 0; i <= kTimed; ++i) {
+        std::array<uint32_t, kMaxK + 1> input{};
+        for (uint32_t j = 0; j < rows; ++j) input[j] = kBenchPrompt[(i + j) % kBenchPromptLen];
+        const auto t = std::chrono::steady_clock::now();
+        eng.verify({input.data(), rows});
+        eng.commit(1);
+        if (i) ms[rows - 1] += since(t) / kTimed;
+      }
+    for (uint32_t i = 0; k_ > 0 && i <= kTimed; ++i) {
+      const auto t = std::chrono::steady_clock::now();
+      (void)eng.propose(kBenchPrompt[i % kBenchPromptLen], kMaxK);
+      if (i) draft_ms += since(t) / kTimed;
+    }
+    reset();
+    gen_tokens_ = 0;
+    if (k_ > 0) live.seed(kDepth, ms, draft_ms);
+    return {ms, draft_ms};
+  }
 
   // POST /v1/control/reconfigure: the drafter on (K) or off (0) between requests; lookup only beside it.
   void set_spec(uint32_t k, bool lookup) {
@@ -108,13 +148,17 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     flush_commit();
     settle_first(sampling);
     const uint32_t id = next_;
+    const uint32_t n = eng.position();
+    const auto t = std::chrono::steady_clock::now();
     if (sampling.greedy) {
       next_ = eng.append(id);   // the greedy plain step (its candidate head), committed in the same submission
+      time_verify(n, 1, t);
     } else {
       eng.verify({&id, 1});
       eng.read_logits(0, host_logits_);
       next_ = draw(sampling, host_logits_.data(), {&id, 1});
       eng.commit(1);
+      time_verify(n, 1, t);
     }
     ++gen_tokens_;
     return id;
@@ -143,7 +187,9 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     }
     if (!eng.dflash()) {
       ++iters_at_k_[k];
+      const auto t = std::chrono::steady_clock::now();
       const auto proposed = eng.propose(next_, k);
+      time_draft(n, k, t);
       return verify_run(sampling, n, std::vector<uint32_t>(proposed.begin(), proposed.end()));
     }
     float T = 0.f;
@@ -153,7 +199,9 @@ struct Inkling2EngineAdapterT : server::EngineIface {
       T = server::dflash_temperature(sampling);
       seed = rng_();
     }
+    const auto t = std::chrono::steady_clock::now();
     const auto proposed = eng.propose(next_, k, T, seed);
+    time_draft(n, k, t);
     const runtime::dflash::DFlashDraftOut& o = eng.draft_out();
     server::SparseQ q[kMaxK];
     float p[kMaxK];
@@ -161,8 +209,8 @@ struct Inkling2EngineAdapterT : server::EngineIface {
       q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T > 0.f ? T : 1.f);
       p[j] = float(q[j].prob(proposed[j]));
     }
-    if (!costs_.empty()) {   // E(K) = 1 + c_1 + c_1 c_2 + ... over verify[K] + the draft pass, the best K <= k
-      const server::MtpCost c = server::cost_at_depth(costs_, n);
+    if (live_) {   // E(K) = 1 + c_1 + c_1 c_2 + ... over verify[K] + the draft pass, the best K <= k
+      const server::MtpCost c = live_->at(n);
       double kept = 1.0, ids = 1.0, best = 0.0;
       uint32_t at = k;
       for (uint32_t j = 0; j < k; ++j) {
@@ -195,14 +243,14 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     const uint32_t m = p - pending_pos_ - 1;
     gen_tokens_ -= pending_j_ - m;
     pending_ = false;
-    eng.commit(m + 1);
+    timed_commit(m + 1);
     next_ = m < pending_j_ ? pending_drafts_[m] : pending_next_;
   }
 
   void flush_commit() {
     if (!pending_) return;
     pending_ = false;
-    eng.commit(pending_j_ + 1);
+    timed_commit(pending_j_ + 1);
     next_ = pending_next_;
   }
 
@@ -335,6 +383,22 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     next_ = draw(sampling, host_logits_.data());
   }
 
+  void time_verify(uint32_t pos, uint32_t rows, std::chrono::steady_clock::time_point t, double more_ms = 0) {
+    if (live_)
+      live_->verify(pos, rows,
+                    more_ms + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count());
+  }
+  // A drafted round's deferred commit, its time added to the round's verify (pending_ms_) - the round's whole cost.
+  void timed_commit(uint32_t rows) {
+    const auto t = std::chrono::steady_clock::now();
+    eng.commit(rows);
+    time_verify(pending_pos_, pending_rows_, t, pending_ms_);
+  }
+  void time_draft(uint32_t pos, uint32_t k, std::chrono::steady_clock::time_point t) {
+    if (live_)
+      live_->draft(pos, k, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count());
+  }
+
   // x = next_ and `drafts` verified at positions n .. n + k; the commit deferred. `q`: the drafts were drawn from these
   // sparse rows (the DFlash 2 walk), the exact rule; none: deterministic drafts, the point-mass rule.
   std::vector<uint32_t> verify_run(const server::Sampling& sampling, uint32_t n, const std::vector<uint32_t>& drafts,
@@ -345,6 +409,7 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     // greedy: the plain step's candidate head (the same pick whenever the full head's winner is among its candidates);
     // tp's head is split across the cards, whole.
     std::span<const uint32_t> pred;
+    const auto t = std::chrono::steady_clock::now();
     if constexpr (requires { eng.verify(rows, true); })
       pred = eng.verify(rows, sampling.greedy);
     else
@@ -362,6 +427,8 @@ struct Inkling2EngineAdapterT : server::EngineIface {
             : server::accept_point_mass(spec_logits_.data(), drafts.data(), k, vocab_used_, vocab_used_, sampling, rng_,
                                         history);
     }
+    pending_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+    pending_rows_ = uint32_t(rows.size());
     pending_ = true;
     pending_pos_ = n;
     pending_j_ = a.accepted;
@@ -387,7 +454,7 @@ struct Inkling2EngineAdapterT : server::EngineIface {
   std::chrono::steady_clock::time_point gen_start_{};
   uint32_t k_;
   uint32_t verified_ = 0;     // the drafts the last step_many verified
-  std::vector<std::pair<uint32_t, server::MtpCost>> costs_;   // set_verify_costs
+  server::LiveCost* live_ = nullptr;   // set_live_costs
   // The selector's probabilities against the drafts kept, by position. The DFlash 2 drafter starts from the
   // measured per-(position, bin) rates (kDflash2CalibSeed) as its prior at weight 100, not the stated
   // probability - chosen on the held-out sets by tools/oracle/price_stop.py.
@@ -395,6 +462,8 @@ struct Inkling2EngineAdapterT : server::EngineIface {
   bool lookup_;
   bool pending_ = false;      // a run's commit is deferred
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
+  uint32_t pending_rows_ = 0;   // its verify's rows and time, timed into live_ with its commit
+  double pending_ms_ = 0;
   std::vector<uint32_t> pending_drafts_;
   uint64_t iters_ = 0, lookup_iters_ = 0, drafted_ = 0, accepted_ = 0;
   uint64_t iters_at_k_[kMaxK + 1] = {};

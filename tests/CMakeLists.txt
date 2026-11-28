@@ -2653,7 +2653,7 @@ set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60
 # Validation queue row 79 (the validation queue). Host, no device: the per-card descriptor, plan and kernel names
 # (tp_desc_test); the per-card slicing rules, card tiles = one-card tiles, the one-card gather of state and KV
 # (tp_slice_test); the crossing's protocol on two host threads, both forms, a stale and a dropped send
-# (tp_protocol_test).
+# (tp_protocol_test); the bf16 wire's packing and fixed sum order as a host twin on random data (tp_wire_bf16_test).
 add_executable(tp_desc_test model/tp_desc_test.cc)
 target_include_directories(tp_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(tp_desc_test PRIVATE b70_plan b70_model)
@@ -2668,6 +2668,11 @@ target_include_directories(tp_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(tp_protocol_test PRIVATE b70_model Threads::Threads)
 add_test(NAME tp_protocol_test COMMAND tp_protocol_test)
 set_tests_properties(tp_protocol_test PROPERTIES TIMEOUT 300)
+add_executable(tp_wire_bf16_test runtime/tp_wire_bf16_test.cc)
+target_include_directories(tp_wire_bf16_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_wire_bf16_test PRIVATE b70_model Threads::Threads)
+add_test(NAME tp_wire_bf16_test COMMAND tp_wire_bf16_test)
+set_tests_properties(tp_wire_bf16_test PROPERTIES TIMEOUT 300)
 
 # Both cards; SKIP (77) with fewer than two GPUs or without peer access both ways.
 # tp_kernels_test (no checkpoint): the crossing against prep_res_fold, bitwise (slices) / the host's sum (folded),

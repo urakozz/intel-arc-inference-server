@@ -8,6 +8,10 @@ namespace kernels::inkling2 {
 
 using D = model::Inkling2Desc;
 inline constexpr unsigned kPartitions = 32;
+// tp's verify rows' attention (PERF-147): a (kv head, block)'s rows over this many work-groups (kol_attn.cl
+// ATTN_RSPLIT, the `_RS2` builds at 2..8 rows; grid z), so its half heads keep one card's work-group count. One card
+// keeps one (measured at 4k: 2 rows +0.08 ms, 4 / 8 rows -0.12 ms of a 14-23 ms step - not taken).
+inline constexpr unsigned kTpAttnRowSplit = 2;
 inline constexpr unsigned kWindowRing = 4096, kDraftRing = 2048;
 inline constexpr std::array<std::pair<unsigned, unsigned>, 6> kInt8Linears{{
     {D::hidden, D::q_n}, {D::hidden, D::kv_n}, {D::hidden, D::q_heads * D::relative_dim}, {D::hidden, 64},
@@ -46,6 +50,8 @@ inline constexpr GemvBf16Tiling bf16_tiling(unsigned n) {
 inline std::string bf16_linear(unsigned m, unsigned k, unsigned n) { return gemv_bf16_variant(m, k, n, bf16_tiling(n)); }
 inline std::string markov_linear() { return bf16_linear(1, 2 * (D::markov_rank + D::hidden), 3 * D::markov_rank); }
 inline std::string route() { return "kol_route_E128_T8_N128_L128_RENORM"; }
+// The selection the engine binds: only the candidates ranked (PERF-28, ROUTE_CAND), bitwise route()'s kol_route.
+inline std::string route_select() { return route() + "_CAND"; }
 // PERF-123's greedy head: df_candidate's top 64 a row over the 2-bit logits, head_cand.cl at the hidden width.
 inline constexpr std::string_view kHeadCandidates = "df_candidate_R7_N200064_U200058_K64";
 inline std::string head_candidates() { return head_cand_variant(D::hidden); }
@@ -109,7 +115,9 @@ inline std::string tp_moe(unsigned m, common::ExpertFpFormat format) {
          (format == common::ExpertFpFormat::Nvfp4 ? "NVFP4" : "MXFP8");
 }
 inline std::string tp_cross(unsigned m, unsigned rank) {
-  return "tp_cross_M" + std::to_string(m) + "_K2304_G9_S1_X_R" + std::to_string(rank) + "_sum";
+  // The verify rows (m > 1) cross on the bf16 wire (tp.cl TP_WIRE_BF16): half the bytes, the order kept, not bitwise
+  // the fp32 wire. One row keeps the fp32 wire.
+  return "tp_cross_M" + std::to_string(m) + "_K2304_G9_S1_X_R" + std::to_string(rank) + (m > 1 ? "_sum_BF16" : "_sum");
 }
 inline constexpr std::string_view kTpPrep = "ink_prep_Q12KV4_D128_REL16_FUSED";
 inline constexpr std::string_view kTpGlue = "ink_glue_H2304_TP";

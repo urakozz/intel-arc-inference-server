@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
     want.insert(kernels::gemm_sm_variant(m, *kernels::small_m_tuning(ink::D::hidden, ink::D::head_rows, 1, 3)));
     want.insert(ink::int8(m, ink::D::hidden, 512));                     // the candidate head's rescore
     want.insert(kernels::gemv_i8w_variant(m, ink::D::hidden, ink::kTapColumns));
+    if (m == 1) want.insert(kernels::gemv_i8w_variant(m, ink::D::hidden, ink::kTapColumns) + "_KS");
     // `--parallel tp`
     want.insert(ink::tp_qkv(m));
     want.insert(ink::tp_o_proj(m));
@@ -32,6 +33,9 @@ int main(int argc, char** argv) {
     want.insert(ink::tp_attn(m, true));
     want.insert(ink::tp_attn(m, false));
     want.insert(ink::tp_attn(m, false) + "_KV8");
+    if (m > 1)   // the decode's rows over two work-groups (kTpAttnRowSplit)
+      for (const std::string& v : {ink::tp_attn(m, true), ink::tp_attn(m, false), ink::tp_attn(m, false) + "_KV8"})
+        want.insert(v + "_RS2");
     for (unsigned rank = 0; rank < 2; ++rank) want.insert(ink::tp_cross(m, rank));
     want.insert(ink::bf16_linear(m, ink::D::hidden, ink::D::kv_n / 2));   // the drafter's context k / v under tp
   }
@@ -54,6 +58,7 @@ int main(int argc, char** argv) {
   want.emplace(std::string(ink::kPrep) + "_FUSED_KV8");
   want.insert(ink::route());
   want.insert(ink::route() + "_M1_FUSED");
+  want.insert(ink::route_select());
   want.insert(ink::markov_linear());
   for (const auto& [k, n] : ink::kDraftBf16Linears) want.insert(ink::bf16_linear(8, k, n));
   want.insert(ink::int8(1, 256, ink::D::head_rows));

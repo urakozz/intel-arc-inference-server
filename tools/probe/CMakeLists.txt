@@ -1775,6 +1775,19 @@ foreach(name IN LISTS B70_INKLING_PREFILL_KERNELS)
     add_dependencies(probe_ink_attn_depth kernel_${name})
   endif()
 endforeach()
+# PERF-98 (Inkling): the bf16 full PAIR form's K / V operand reads - ROW the rows a lane (before PAIR_K2D / PAIR_V2D,
+# kol_pf_attn.cl), K2D / V2D each 2D read alone; the production build has both.
+foreach(_v "ROW|PAIR_K2D=0" "K2D|PAIR_K2D=1" "V2D|PAIR_V2D=1")
+  string(REPLACE "|" ";" _v "${_v}")
+  list(GET _v 0 _tag)
+  list(SUBLIST _v 1 -1 _defs)
+  set(_n kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_PAIR_${_tag})
+  add_ocloc_kernel(${_n} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/kolibri/kol_pf_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 PAIR=1
+                           ${_defs}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_dependencies(probe_ink_attn_depth kernel_${_n})
+endforeach()
 
 # --- probe_ink_draft_attn: plan 41h, the Inkling drafter's full-layer attention at depth, scalar part against DPAS.
 add_executable(probe_ink_draft_attn probe_ink_draft_attn.cc)

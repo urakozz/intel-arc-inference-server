@@ -275,6 +275,16 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
   const auto residual = [&](uint32_t slot) { return at(*s.residual, slot * hidden); };
   const auto bank = [&](uint32_t slot) { return at(*s.block_bank, slot * hidden); };
   const auto activ = [&](uint32_t slot) { return at(*s.inputs, slot * arow); };
+  // tp: a long enough chunk's glue rows split between the cards - card 0 the rows before `half`, card 1 the rest -
+  // each part's glue output gathered onto both before the column-split linears read it (one card: every row).
+  const uint32_t half = tp_.on() ? tp_split_rows(m) : 0;
+  const uint32_t row0 = half && tp_.rank ? half : 0, own = half ? (tp_.rank ? m - half : half) : m;
+  const auto gather = [&](std::initializer_list<uint32_t> slots) {
+    Crossing x;
+    for (const auto slot : slots)
+      x.gather[x.ranges++] = {at(*s.inputs, slot * arow + size_t(row0) * D::hidden * bf16), size_t(own) * D::hidden * bf16};
+    return x;
+  };
   void*& current = w.current;
   void*& next = w.next;
   void*& midpoint = w.midpoint;
@@ -287,8 +297,8 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
   const auto mix_norm = [&](const void* last, const void* query, uint32_t queries, const void* q,
                             const void* k = nullptr, const void* v = nullptr) {
     if (profile_pool_) profile_stage_ = queries == 1 ? "1 query" : "3 queries";
-    launch(list, glue, "ink_depth_mix_norm", 128, queries, m, bank(0), query, activ(0),
-           finished + 1, m, desc_.eps, q, k, v, last);
+    launch(list, glue, "ink_depth_mix_norm", 128, queries, own, bank(0), query, activ(0),
+           finished + 1, m, desc_.eps, q, k, v, last, row0);
     profile_stage_.clear();
   };
   const auto controller = [&](void* last, const void* query, const void* messages,
@@ -303,16 +313,18 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
     const auto streams = uint32_t(names.size());
     if (profile_pool_) profile_stage_ = streams == 1 ? "mlp" : shared_mix ? "attn shared" : "attn";
     if (shared_mix && streams == 3)   // a window visit's attention controller: one x for its three streams
-      launch(list, glue, "ink_prefill_mix_cat", 128, m, 1, bank(0), last, query, messages, mixed, cat, finished + 1,
-             m, desc_.eps);
+      launch(list, glue, "ink_prefill_mix_cat", 128, own, 1, bank(0), last, query, messages, mixed, cat, finished + 1,
+             m, desc_.eps, row0);
     else
-      launch(list, glue, "ink_mix_cat", 128, streams, m, bank(0), last, query, messages,
-             mixed, cat, finished + 1, m, uint32_t(shared_mix), desc_.eps, raw, history, taps, prior);
+      launch(list, glue, "ink_mix_cat", 128, streams, own, bank(0), last, query, messages,
+             mixed, cat, finished + 1, m, uint32_t(shared_mix), desc_.eps, raw, history, taps, prior, row0);
     for (uint32_t i = 0; i < streams; ++i) {
       const auto prefix = layer + "controllers." + names[i] + ".";
-      auto* rank = static_cast<std::byte*>(low) + size_t(i) * m * D::controller_rank * bf16;
-      prefill_linear(list, prefix + "down_weight", m, static_cast<std::byte*>(cat) + 2 * i * arow, low_f32);
-      launch(list, glue, "ink_pack", 64, m * D::controller_rank / 64, 1, low_f32, rank);
+      auto* rank = static_cast<std::byte*>(low) + (size_t(i) * m + row0) * D::controller_rank * bf16;
+      auto* low_rows = static_cast<std::byte*>(low_f32) + size_t(row0) * D::controller_rank * f32;
+      prefill_linear(list, prefix + "down_weight", own,
+                     static_cast<std::byte*>(cat) + 2 * (i * arow + size_t(row0) * D::hidden * bf16), low_rows);
+      launch(list, glue, "ink_pack", 64, own * D::controller_rank / 64, 1, low_rows, rank);
     }
     std::array<const void*, 6> gates{};
     for (uint32_t i = 0; i < streams; ++i) {
@@ -320,8 +332,9 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
       gates[i] = weight(prefix + "forget_weight");
       gates[3 + i] = weight(prefix + "gain_weight");
     }
-    launch(list, glue, "ink_prefill_controller", 128, (m + 7) / 8, streams, low, mixed, messages, activ(0),
-           gates[0], gates[1], gates[2], gates[3], gates[4], gates[5], norms[0], norms[1], norms[2], m, desc_.eps);
+    launch(list, glue, "ink_prefill_controller", 128, (own + 7) / 8, streams, low, mixed, messages, activ(0),
+           gates[0], gates[1], gates[2], gates[3], gates[4], gates[5], norms[0], norms[1], norms[2], m, desc_.eps,
+           row0);
     profile_stage_.clear();
   };
 
@@ -351,7 +364,7 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
       for (uint32_t t = 0; t + 1 < desc_.draft.taps.size(); ++t)
         if (v.conv_slot + 1 == desc_.draft.taps[t]) draft_tap = at(*s.draft_taps, size_t(t) * D::hidden * bf16);
 
-    if (w.phase == 0) {
+    if (w.phase == 0 && !w.gathered) {
       if (v.conv_slot == stage_.first && v.conv_slot) {   // the split: handoff_rows' rows are in place
         contract_assert(current == residual(0) && prev_midpoint == residual(3) && v.controller);
         list.copy(residual(2), bank(1), hidden);   // the prelude residual is finished block 1
@@ -369,9 +382,9 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
       }
       if (l == D::core_start + D::block_layers) list.copy(midpoint, current, hidden);
       if (v.controller)
-        launch(list, glue, "ink_prefill_cross_mix", 128, m, 1, prev_midpoint,
+        launch(list, glue, "ink_prefill_cross_mix", 128, own, 1, prev_midpoint,
                weight(root + "middle_cycle_cross_pass_queries"), weight(root + "middle_cycle_cross_pass_kv_queries"),
-               s.messages->ptr(), m, residual(4), l - D::core_start);
+               s.messages->ptr(), m, residual(4), l - D::core_start, row0);
 
       const auto qnorm = layer + (v.window ? "attn_norm.weight" : "q_input_norm.weight");
       const auto knorm = v.window ? qnorm : layer + "k_input_norm.weight";
@@ -387,7 +400,14 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
           mix_norm(current, query, v.window ? 1 : 3, weight(qnorm),
                    v.window ? nullptr : weight(knorm), v.window ? nullptr : weight(vnorm));
         }
+        if (half) {   // the attention's inputs (q || gate || relative || sinks, then k and v unless one row serves)
+          w.gathered = true;
+          return v.window && !v.controller ? gather({0}) : gather({0, 1, 2});
+        }
       }
+    }
+    if (w.phase == 0) {
+      w.gathered = false;
       const auto* ak = activ(v.window && !v.controller ? 0 : 1);
       const auto* av = activ(v.window && !v.controller ? 0 : 2);
       auto* q = at(*s.projections);
@@ -488,13 +508,13 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
       if (tp_.on()) {   // this card's heads' share of o_proj; both cards' into raw_attn
         prefill_linear(list, a + "wo_ud.weight", m, s.attention->ptr(), s.tp_part->ptr());
         w.phase = 1;
-        return Crossing{s.tp_part->ptr(), raw_attn, m};
+        return Crossing{s.tp_part->ptr(), raw_attn, m, half};
       }
       prefill_linear(list, a + "wo_ud.weight", m, s.attention->ptr(), raw_attn);
       w.phase = 1;
     }
 
-    if (w.phase == 1) {
+    if (w.phase == 1 && !w.gathered) {
       if (v.block_boundary) list.copy(bank(finished++), current, hidden);
       const auto* mlp_query = weight(root + "attn_res.mlp_queries." + std::to_string(l));
       const auto* mlp_norm = weight(layer + "mlp_norm.weight");
@@ -504,12 +524,19 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
         controller(next, mlp_query, at(*s.messages, 3 * message), layer, std::array{"mlp"},
                    {mlp_norm, nullptr, nullptr}, true, raw_attn, hist_attn, post_taps, prior);
       } else {
-        launch(list, glue, "ink_post_mix_norm", 128, m, 1, bank(0), next, mlp_query, activ(0), mlp_norm,
-               finished + 1, m, desc_.eps, raw_attn, hist_attn, post_taps, prior);
+        launch(list, glue, "ink_post_mix_norm", 128, own, 1, bank(0), next, mlp_query, activ(0), mlp_norm,
+               finished + 1, m, desc_.eps, raw_attn, hist_attn, post_taps, prior, row0);
       }
+      if (half) {   // the router's and the experts' input
+        w.gathered = true;
+        return gather({0});
+      }
+    }
+    if (w.phase == 1) {
+      w.gathered = false;
 
       prefill_linear(list, layer + "mlp.gate.weight", m, activ(0), s.route_logits->ptr());
-      launch(list, k::route(), "kol_route", 128, 1, m, s.route_logits->ptr(), weight(layer + "mlp.gate.bias"),
+      launch(list, k::route_select(), "kol_route", 128, 1, m, s.route_logits->ptr(), weight(layer + "mlp.gate.bias"),
              s.routes->ptr());
       const std::string sorter(k::kPrefillSort);
       const std::string moe = std::string(tp_.on() ? k::kTpPrefillMoe : k::kPrefillMoe) + (bf16_glue_ ? "_BF16" : "");
@@ -546,15 +573,15 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
                s.expert_output->ptr(), weight(layer + "mlp_sconv.weight"), hist_mlp, s.tp_part->ptr(), next,
                nullptr, m);
         w.phase = 2;
-        return Crossing{s.tp_part->ptr(), raw_mlp, m};
+        return Crossing{s.tp_part->ptr(), raw_mlp, m, half, int32_t(w.visit)};
       }
       launch(list, moe, "ink_prefill_moe_combine", 256, D::hidden / 256, groups, s.routes->ptr(), pair_row,
              s.expert_output->ptr(), weight(layer + "mlp_sconv.weight"), hist_mlp, raw_mlp, next, draft_tap, m);
     }
 
     if (tp_.on())   // the experts' convolution and partial sum over the all-reduced rows
-      launch(list, glue, "ink_post_conv", 128, D::hidden / 128, m, raw_mlp, hist_mlp, weight(layer + "mlp_sconv.weight"),
-             next, next, draft_tap);
+      launch(list, glue, "ink_post_conv", 128, D::hidden / 128, own, raw_mlp, hist_mlp,
+             weight(layer + "mlp_sconv.weight"), next, next, draft_tap, row0);
     launch(list, glue, "ink_prefill_commit_conv", 128, 2 * (tp_.kv_n() + D::hidden) / 128, 1,
            raw_k, hist_k, hist_v, hist_attn, hist_mlp, m);
     if (w.head && trace_prelude_ && v.conv_slot < D::core_start) {
@@ -564,22 +591,32 @@ std::optional<Engine::Crossing> Engine::record_prefill_part(l0::CmdList& list, P
     }
     std::swap(current, next);
   }
-  w.done = true;
   if (!stage_.head()) {   // the rows cross (handoff_rows), PpEngine's copies
+    w.done = true;
     contract_assert(current == residual(0) && prev_midpoint == residual(3));
     return std::nullopt;
   }
 
   const bool drafter = buffers_.weights.draft != nullptr;
-  if (w.head || drafter)
-    mix_norm(current, weight(root + "attn_res.output_query"), 1, weight(root + "norm.weight"));
+  constexpr size_t tap_row = 4 * D::hidden * bf16;
+  if (!w.gathered) {
+    if (w.head || drafter)
+      mix_norm(current, weight(root + "attn_res.output_query"), 1, weight(root + "norm.weight"));
+    if (drafter)
+      launch(list, glue, "ink_tap", 128, D::hidden / 128, own, nullptr, activ(0), s.draft_taps->ptr(), 3u, row0);
+    if (half && (w.head || drafter)) {   // the head's row and the drafter's taps
+      w.gathered = true;
+      Crossing x = gather({0});
+      if (drafter) x.gather[x.ranges++] = {at(*s.draft_taps, size_t(row0) * tap_row), size_t(own) * tap_row};
+      return x;
+    }
+  }
+  w.gathered = false;
+  w.done = true;
   if (drafter && dflash()) {
-    launch(list, glue, "ink_tap", 128, D::hidden / 128, m, nullptr, activ(0), s.draft_taps->ptr(), 3u);
     record_dflash_prompt_context(list, chunk, s);
   } else if (drafter) {
     auto* taps = s.draft_taps->ptr();
-    launch(list, glue, "ink_tap", 128, D::hidden / 128, m, nullptr, activ(0), taps, 3u);
-    constexpr size_t tap_row = 4 * D::hidden * bf16;
     const size_t kv_row = tp_.draft_kv_n() * bf16, kv_f32 = tp_.draft_kv_n() * f32;   // the card's heads (tp)
     list.copy(buffers_.draft.draft_tap->ptr(), at(*s.draft_taps, (m - 1) * tap_row), tap_row);
     const auto& d = buffers_.draft;
